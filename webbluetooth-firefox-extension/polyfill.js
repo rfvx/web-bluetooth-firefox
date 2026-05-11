@@ -9,13 +9,11 @@ if (!navigator.bluetooth) {
     // Function to send messages from the polyfill to the background script (via page bridge)
     async function sendMessageFromPolyfill(command, args) {
         return new Promise((resolve, reject) => {
-            // Generate a unique ID for this polyfill-originated message
             const polyfillMessageId = `polyfill-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
-            // Listen for the response specific to this message
             const listener = (event) => {
                 if (event.source === window && event.data && event.data.type === 'FROM_CONTENT_SCRIPT' && event.data.id === polyfillMessageId) {
-                    window.removeEventListener('message', listener); // Clean up listener
+                    window.removeEventListener('message', listener);
                     if (event.data.error) {
                         reject(new Error(event.data.error));
                     } else {
@@ -25,18 +23,14 @@ if (!navigator.bluetooth) {
             };
             window.addEventListener('message', listener);
 
-            // Post the message to the content script via the page bridge
             window.postMessage({
-                type: 'FROM_PAGE', // Use the same type as regular page messages
+                type: 'FROM_PAGE',
                 id: polyfillMessageId,
-                payload: { command: command, ...args } // Spread args into the payload
+                payload: { command: command, ...args }
             }, '*');
         });
     }
 
-    // --- Polyfill classes (simplified for initial implementation) ---
-
-    // Define basic EventTarget for dispatching events
     class BluetoothEventTarget {
         constructor() {
             this._listeners = {};
@@ -64,7 +58,7 @@ if (!navigator.bluetooth) {
             if (!(event.type in this._listeners)) {
                 return true;
             }
-            const stack = [...this._listeners[event.type]]; // Copy to prevent issues if listeners modify the list
+            const stack = [...this._listeners[event.type]];
             for (let i = 0, l = stack.length; i < l; i++) {
                 stack[i].call(this, event);
             }
@@ -76,7 +70,7 @@ if (!navigator.bluetooth) {
         constructor(device) {
             super();
             this.device = device;
-            this._connected = false; // Internal state for connection
+            this._connected = false;
         }
 
         get connected() {
@@ -98,13 +92,17 @@ if (!navigator.bluetooth) {
         async disconnect() {
             console.log(`Polyfill: Disconnecting from ${this.device.address}`);
             await sendMessageFromPolyfill('disconnect_device', { address: this.device.address });
-            this._connected = false;
-            this.dispatchEvent(new Event('gattserverdisconnected'));
+            this._onDisconnected();
         }
 
-        // Placeholder for GATT services/characteristics/descriptors
+        _onDisconnected() {
+            if (this._connected) {
+                this._connected = false;
+                this.device.dispatchEvent(new Event('gattserverdisconnected'));
+            }
+        }
+
         async getPrimaryService(service) {
-            console.log(`Polyfill: getPrimaryService called for ${service}`);
             const serviceUuid = window.BluetoothUUID.getService(service);
             const response = await sendMessageFromPolyfill('get_primary_service', { address: this.device.address, service_uuid: serviceUuid });
             if (response.status === "success" && response.uuid) {
@@ -112,8 +110,8 @@ if (!navigator.bluetooth) {
             }
             throw new Error(`Service ${service} not found or error: ${response.message}`);
         }
+
         async getPrimaryServices(service) {
-            console.log(`Polyfill: getPrimaryServices called for ${service}`);
             const serviceUuid = service ? window.BluetoothUUID.getService(service) : null;
             const response = await sendMessageFromPolyfill('get_primary_services', { address: this.device.address, service_uuid: serviceUuid });
             if (response.status === "success" && response.uuids) {
@@ -133,7 +131,6 @@ if (!navigator.bluetooth) {
 
         async getCharacteristic(characteristic) {
             const charUuid = window.BluetoothUUID.getCharacteristic(characteristic);
-            // Verify with host
             const response = await sendMessageFromPolyfill('get_characteristics', {
                 address: this.device.address,
                 service_uuid: this.uuid
@@ -161,7 +158,6 @@ if (!navigator.bluetooth) {
         }
     }
 
-    // Registry to keep track of active characteristics for notification dispatch
     const characteristicRegistry = new Map();
 
     class BluetoothRemoteGATTCharacteristic extends BluetoothEventTarget {
@@ -171,7 +167,6 @@ if (!navigator.bluetooth) {
             this.uuid = uuid;
             this.value = null;
             
-            // Register this characteristic for notifications
             const registryKey = `${this.service.device.address}-${this.uuid}`;
             if (!characteristicRegistry.has(registryKey)) {
                 characteristicRegistry.set(registryKey, []);
@@ -180,7 +175,6 @@ if (!navigator.bluetooth) {
         }
 
         async readValue() {
-            console.log(`Polyfill: Reading characteristic ${this.uuid}`);
             const response = await sendMessageFromPolyfill('read_gatt_char', {
                 address: this.service.device.address,
                 service_uuid: this.service.uuid,
@@ -205,7 +199,18 @@ if (!navigator.bluetooth) {
         }
 
         async writeValue(value) {
-            // value can be ArrayBuffer, TypedArray, or DataView
+             return this.writeValueWithResponse(value);
+        }
+
+        async writeValueWithResponse(value) {
+            return this._write(value, true);
+        }
+
+        async writeValueWithoutResponse(value) {
+            return this._write(value, false);
+        }
+
+        async _write(value, response) {
             let bytes;
             if (value instanceof DataView) {
                 bytes = new Uint8Array(value.buffer);
@@ -217,28 +222,26 @@ if (!navigator.bluetooth) {
                 bytes = new Uint8Array(value);
             }
 
-            // Safe base64 conversion
             let binary = '';
             for (let i = 0; i < bytes.byteLength; i++) {
                 binary += String.fromCharCode(bytes[i]);
             }
             const base64Value = btoa(binary);
 
-            console.log(`Polyfill: Writing characteristic ${this.uuid}`);
-            const response = await sendMessageFromPolyfill('write_gatt_char', {
+            const res = await sendMessageFromPolyfill('write_gatt_char', {
                 address: this.service.device.address,
                 service_uuid: this.service.uuid,
                 char_uuid: this.uuid,
-                value: base64Value
+                value: base64Value,
+                response: response
             });
 
-            if (response.status !== "success") {
-                throw new Error(`Failed to write characteristic: ${response.message}`);
+            if (res.status !== "success") {
+                throw new Error(`Failed to write characteristic: ${res.message}`);
             }
         }
 
         async startNotifications() {
-            console.log(`Polyfill: Starting notifications for ${this.uuid}`);
             const response = await sendMessageFromPolyfill('start_notify', {
                 address: this.service.device.address,
                 service_uuid: this.service.uuid,
@@ -251,7 +254,6 @@ if (!navigator.bluetooth) {
         }
 
         async stopNotifications() {
-            console.log(`Polyfill: Stopping notifications for ${this.uuid}`);
             const response = await sendMessageFromPolyfill('stop_notify', {
                 address: this.service.device.address,
                 service_uuid: this.service.uuid,
@@ -262,16 +264,35 @@ if (!navigator.bluetooth) {
             }
             return this;
         }
+
+        async getDescriptor(descriptor) {
+            console.warn("Polyfill: getDescriptor not implemented.");
+            throw new Error("getDescriptor not implemented");
+        }
+
+        async getDescriptors(descriptor) {
+            console.warn("Polyfill: getDescriptors not implemented.");
+            return [];
+        }
     }
 
-    // Listen for notifications from the content script relay
+    const deviceRegistry = new Map();
+
     window.addEventListener('message', (event) => {
-        if (event.source === window && event.data && event.data.type === 'FROM_CONTENT_SCRIPT' && event.data.event === 'gatt_notification') {
-            const { address, char_uuid, value } = event.data.data;
-            const registryKey = `${address}-${char_uuid}`;
-            const characteristics = characteristicRegistry.get(registryKey);
-            if (characteristics) {
-                characteristics.forEach(char => char._updateValue(value));
+        if (event.source === window && event.data && event.data.type === 'FROM_CONTENT_SCRIPT') {
+            if (event.data.event === 'gatt_notification') {
+                const { address, char_uuid, value } = event.data.data;
+                const registryKey = `${address}-${char_uuid}`;
+                const characteristics = characteristicRegistry.get(registryKey);
+                if (characteristics) {
+                    characteristics.forEach(char => char._updateValue(value));
+                }
+            } else if (event.data.event === 'device_disconnected') {
+                const { address } = event.data;
+                const device = deviceRegistry.get(address);
+                if (device && device.gatt) {
+                    device.gatt._onDisconnected();
+                }
             }
         }
     });
@@ -279,72 +300,236 @@ if (!navigator.bluetooth) {
     class BluetoothDevice extends BluetoothEventTarget {
         constructor(address, name) {
             super();
-            this.id = address; // Web Bluetooth ID is typically a UUID, but using address for now
+            this.id = address;
             this.name = name;
-            this.address = address; // Keep address for native host communication
+            this.address = address;
             this.gatt = new BluetoothRemoteGATTServer(this);
+            deviceRegistry.set(address, this);
         }
 
-        // Placeholder for other BluetoothDevice methods
         async watchAdvertisements(options) {
             console.warn("Polyfill: watchAdvertisements not implemented.");
-            // Example of how to send a command
-            await sendMessageFromPolyfill('watch_advertisements', { address: this.address, options });
         }
         async forget() {
             console.warn("Polyfill: forget not implemented.");
-            await sendMessageFromPolyfill('forget_device', { address: this.address });
         }
     }
 
-    // --- Implement navigator.bluetooth ---
-    navigator.bluetooth = {
+    // --- Device Picker UI ---
+    class DevicePicker {
+        constructor() {
+            this.overlay = null;
+            this.container = null;
+            this.deviceList = null;
+            this.selectedDevice = null;
+            this.resolve = null;
+            this.reject = null;
+        }
+
+        _setupStyles() {
+            if (document.getElementById('webbluetooth-polyfill-styles')) return;
+            const style = document.createElement('style');
+            style.id = 'webbluetooth-polyfill-styles';
+            style.textContent = `
+                #webbluetooth-picker-overlay {
+                    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                    background: rgba(0,0,0,0.5); z-index: 1000000;
+                    display: flex; align-items: center; justify-content: center;
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                }
+                #webbluetooth-picker-container {
+                    background: white; padding: 20px; border-radius: 8px;
+                    width: 400px; max-width: 90%; max-height: 80%;
+                    display: flex; flex-direction: column; box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                }
+                #webbluetooth-picker-header { margin: 0 0 15px 0; font-size: 1.2em; font-weight: bold; }
+                #webbluetooth-picker-list {
+                    border: 1px solid #ddd; border-radius: 4px;
+                    overflow-y: auto; flex-grow: 1; margin-bottom: 15px;
+                    min-height: 150px;
+                }
+                .webbluetooth-device-item {
+                    padding: 10px; cursor: pointer; border-bottom: 1px solid #eee;
+                }
+                .webbluetooth-device-item:last-child { border-bottom: none; }
+                .webbluetooth-device-item:hover { background: #f5f5f5; }
+                .webbluetooth-device-item.selected { background: #e3f2fd; font-weight: bold; }
+                #webbluetooth-picker-footer { display: flex; justify-content: flex-end; gap: 10px; }
+                .webbluetooth-btn {
+                    padding: 8px 16px; border-radius: 4px; border: none; cursor: pointer; font-size: 14px;
+                }
+                #webbluetooth-btn-cancel { background: #f0f0f0; }
+                #webbluetooth-btn-pair { background: #007bff; color: white; }
+                #webbluetooth-btn-pair:disabled { background: #ccc; cursor: not-allowed; }
+            `;
+            (document.head || document.documentElement).appendChild(style);
+        }
+
+        show(devices) {
+            this._setupStyles();
+            return new Promise((resolve, reject) => {
+                this.resolve = resolve;
+                this.reject = reject;
+                this.selectedDevice = null;
+
+                this.overlay = document.createElement('div');
+                this.overlay.id = 'webbluetooth-picker-overlay';
+                
+                this.container = document.createElement('div');
+                this.container.id = 'webbluetooth-picker-container';
+                
+                this.container.innerHTML = `
+                    <div id="webbluetooth-picker-header">Select a device</div>
+                    <div id="webbluetooth-picker-list"></div>
+                    <div id="webbluetooth-picker-footer">
+                        <button id="webbluetooth-btn-cancel" class="webbluetooth-btn">Cancel</button>
+                        <button id="webbluetooth-btn-pair" class="webbluetooth-btn" disabled>Pair</button>
+                    </div>
+                `;
+
+                this.overlay.appendChild(this.container);
+                document.body.appendChild(this.overlay);
+
+                this.deviceList = this.container.querySelector('#webbluetooth-picker-list');
+                const pairBtn = this.container.querySelector('#webbluetooth-btn-pair');
+                const cancelBtn = this.container.querySelector('#webbluetooth-btn-cancel');
+
+                if (devices.length === 0) {
+                    this.deviceList.innerHTML = '<div style="padding: 20px; color: #666; text-align: center;">No devices found.</div>';
+                } else {
+                    devices.forEach(device => {
+                        const item = document.createElement('div');
+                        item.className = 'webbluetooth-device-item';
+                        item.textContent = `${device.name} (${device.address})`;
+                        item.onclick = () => {
+                            this.container.querySelectorAll('.webbluetooth-device-item').forEach(el => el.classList.remove('selected'));
+                            item.classList.add('selected');
+                            this.selectedDevice = device;
+                            pairBtn.disabled = false;
+                        };
+                        this.deviceList.appendChild(item);
+                    });
+                }
+
+                pairBtn.onclick = () => {
+                    this.close();
+                    this.resolve(this.selectedDevice);
+                };
+
+                cancelBtn.onclick = () => {
+                    this.close();
+                    this.reject(new Error('User cancelled the device picker.'));
+                };
+            });
+        }
+
+        close() {
+            if (this.overlay) {
+                document.body.removeChild(this.overlay);
+                this.overlay = null;
+            }
+        }
+    }
+
+    const picker = new DevicePicker();
+
+    const bluetoothPolyfill = {
         requestDevice: async function (options) {
             console.log("Polyfill: requestDevice called with options:", options);
-            // In a real polyfill, this would display a chooser UI.
-            // For now, we'll send a scan command and assume the first device if any.
-            // This is a simplified implementation for direct testing purposes.
-            const response = await sendMessageFromPolyfill('scan_devices', { options: options.filters }); // Pass filters for scanning
-            if (response.status === "success" && response.devices && response.devices.length > 0) {
-                // If there's a devices property, use it. Otherwise, assume a direct device response.
-                const devicesToProcess = response.devices || [response]; // Handle both list and single device response
-                
-                // For simplicity, let's just return the first device found during scan
-                // A real implementation would show a chooser UI
-                const firstDevice = devicesToProcess[0];
-                return new BluetoothDevice(firstDevice.address, firstDevice.name);
-            } else {
-                throw new Error(response.message || "No devices found or scan failed.");
+            
+            const scanningOverlay = document.createElement('div');
+            scanningOverlay.innerHTML = '<div style="position: fixed; top: 10px; right: 10px; background: rgba(0,0,0,0.7); color: white; padding: 10px; border-radius: 5px; z-index: 1000001;">Scanning for Bluetooth devices...</div>';
+            document.body.appendChild(scanningOverlay);
+
+            try {
+                const response = await sendMessageFromPolyfill('scan_devices', { options: options });
+                document.body.removeChild(scanningOverlay);
+
+                if (response.status === "success" && response.devices) {
+                    let devices = response.devices;
+                    console.log(`Polyfill: Received ${devices.length} devices from host.`);
+                    
+                    // Basic filtering
+                    if (options && !options.acceptAllDevices && options.filters) {
+                        devices = devices.filter(device => {
+                            const match = options.filters.some(filter => {
+                                // Filter by Services
+                                if (filter.services) {
+                                    const hasAllServices = filter.services.every(service => {
+                                        const filterUuid = window.BluetoothUUID.getService(service).toLowerCase();
+                                        const deviceUuids = (device.uuids || []).map(u => u.toLowerCase());
+                                        const found = deviceUuids.includes(filterUuid);
+                                        if (!found) {
+                                             console.debug(`Polyfill: Device ${device.name} (${device.address}) missing required service ${filterUuid}`);
+                                        }
+                                        return found;
+                                    });
+                                    if (hasAllServices) return true;
+                                }
+                                
+                                // Filter by Name
+                                if (filter.name && device.name === filter.name) return true;
+                                
+                                // Filter by Name Prefix
+                                if (filter.namePrefix && device.name && device.name.startsWith(filter.namePrefix)) return true;
+                                
+                                return false;
+                            });
+                            return match;
+                        });
+                        console.log(`Polyfill: ${devices.length} devices remaining after filtering.`);
+                    } else if (options && options.acceptAllDevices) {
+                        console.log("Polyfill: acceptAllDevices is true, showing all devices.");
+                    }
+
+                    // Show the picker UI
+                    const selected = await picker.show(devices);
+                    return new BluetoothDevice(selected.address, selected.name);
+                } else {
+                    throw new Error(response.message || "Scan failed.");
+                }
+            } catch (error) {
+                if (scanningOverlay.parentNode) document.body.removeChild(scanningOverlay);
+                console.error("Polyfill: requestDevice error:", error);
+                throw error;
             }
         },
         getAvailability: async function () {
-            console.warn("Polyfill: getAvailability not fully implemented.");
             try {
-                // Send a simple command to check if the native host is responsive
                 const response = await sendMessageFromPolyfill('check_availability', {});
-                return response.status === "success";
+                return response.status === "success" && response.available;
             } catch (error) {
                 return false;
             }
         },
         getDevices: async function () {
-            console.warn("Polyfill: getDevices not fully implemented.");
-            const response = await sendMessageFromPolyfill('get_origin_devices', {});
-            if (response.status === "success" && response.devices) {
-                return response.devices.map(d => new BluetoothDevice(d.address, d.name));
-            }
             return [];
+        },
+        addEventListener: function(type, listener) {
+            console.warn(`Polyfill: navigator.bluetooth.addEventListener('${type}') not fully supported.`);
         }
     };
 
-    // --- BluetoothUUID utility (copied from webbt/extension/polyfill.js) ---
+    try {
+        Object.defineProperty(navigator, 'bluetooth', {
+            value: bluetoothPolyfill,
+            configurable: true,
+            enumerable: true,
+            writable: true
+        });
+        console.log("Polyfill: Successfully defined navigator.bluetooth");
+    } catch (e) {
+        console.error("Polyfill: Failed to define navigator.bluetooth using Object.defineProperty", e);
+        // Fallback to simple assignment
+        navigator.bluetooth = bluetoothPolyfill;
+    }
+
     function handleUnnamedUUID(alias, result) {
         if (result) {
             return BluetoothUUID.canonicalUUID(result);
         }
         try {
             return BluetoothUUID.canonicalUUID(alias);
-        /* eslint-disable-next-line no-empty*/
         } catch {}
         if (typeof alias === 'string' && alias.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)) {
             return alias.toLowerCase();
@@ -352,7 +537,6 @@ if (!navigator.bluetooth) {
         throw new TypeError('Not a valid name, short UUID, or full UUID');
     }
 
-    // Placeholder for actual GATT UUID maps - these would typically come from gatt-services.js, etc.
     const STANDARD_GATT_SERVICES = {
         'heart_rate': '0000180d-0000-1000-8000-00805f9b34fb',
         'battery_service': '0000180f-0000-1000-8000-00805f9b34fb',
