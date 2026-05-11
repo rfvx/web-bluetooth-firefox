@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebBluetooth Test Page</title>
+    <meta charset="UTF-8">
+    <style>
+        body { font-family: sans-serif; margin: 20px; }
+        button { padding: 10px 15px; margin: 5px; cursor: pointer; }
+        #results { margin-top: 20px; border: 1px solid #ccc; padding: 15px; min-height: 100px; }
+        .log { font-family: monospace; font-size: 0.9em; margin-bottom: 5px; }
+        .error { color: red; }
+        .info { color: blue; }
+        .warning { color: orange; }
+    </style>
+</head>
+<body>
+    <h1>WebBluetooth Test Page</h1>
+    <p>
+        This page helps test the WebBluetooth extension and its native host.
+        Ensure the extension is loaded in Firefox, the native host script is running in a terminal,
+        and your Bluetooth adapter is enabled.
+    </p>
+    <button id="scanButton">Scan for Bluetooth Devices</button>
+    <button id="connectExampleButton" disabled>Connect to Selected Device (Placeholder)</button>
+
+    <div id="results">
+        <h2>Logs:</h2>
+        <div id="deviceList" style="margin-bottom: 10px; border: 1px solid #eee; padding: 5px; min-height: 50px;">
+            <h3>Discovered Devices:</h3>
+            <p>No devices scanned yet.</p>
+        </div>
+        <p>Check the browser's developer console (Ctrl+Shift+J) for extension logs and your terminal where the host is running for host logs.</p>
+        <div id="outputLog"></div>
+    </div>
+
+    <script>
+        const scanButton = document.getElementById('scanButton');
+        const connectButton = document.getElementById('connectExampleButton');
+        const outputLog = document.getElementById('outputLog');
+        const deviceList = document.getElementById('deviceList');
+
+        let selectedDeviceAddress = null;
+        let selectedDeviceName = null;
+
+        // Function to log messages to the page's output area and browser console
+        function logMessage(message, type = 'info') {
+            const div = document.createElement('div');
+            div.className = `log ${type}`;
+            div.textContent = message;
+            outputLog.appendChild(div);
+            outputLog.scrollTop = outputLog.scrollHeight; // Auto-scroll to bottom
+            console.log(`[Page] ${message}`); // Log to browser console as well
+        }
+
+        // Check for WebBluetooth API availability
+        if (!navigator.bluetooth) {
+            logMessage("Web Bluetooth API is not available in this browser or context.", 'error');
+            scanButton.disabled = true;
+        } else {
+            logMessage("Web Bluetooth API is available.", 'info');
+        }
+
+        // --- Sending Messages to Extension (via content script bridge) ---
+        let messageCounter = 0;
+        const pendingMessages = new Map();
+
+        window.addEventListener('message', event => {
+            if (event.source === window && event.data && event.data.type === 'FROM_CONTENT_SCRIPT') {
+                const { id, response, error } = event.data;
+                if (pendingMessages.has(id)) {
+                    const { resolve, reject } = pendingMessages.get(id);
+                    pendingMessages.delete(id);
+                    if (error) {
+                        reject(new Error(error));
+                    } else {
+                        resolve(response);
+                    }
+                }
+            }
+        });
+
+        async function sendMessageToExtension(message) {
+            logMessage(`Sending command to extension: ${JSON.stringify(message)}`, 'info');
+            return new Promise((resolve, reject) => {
+                const messageId = messageCounter++;
+                pendingMessages.set(messageId, { resolve, reject });
+                window.postMessage({
+                    type: 'FROM_PAGE',
+                    id: messageId,
+                    payload: message
+                }, '*');
+            });
+        }
+
+        // Function to handle device selection
+        function selectDevice(address, name, element) {
+            // Remove 'selected' class from previously selected device
+            const previouslySelected = deviceList.querySelector('.selected-device');
+            if (previouslySelected) {
+                previouslySelected.classList.remove('selected-device');
+            }
+
+            // Add 'selected' class to the new selected device
+            element.classList.add('selected-device');
+
+            selectedDeviceAddress = address;
+            selectedDeviceName = name;
+            connectButton.disabled = false;
+            logMessage(`Selected device: ${name || address}`);
+        }
+
+        // Handle Scan button click
+        scanButton.addEventListener('click', async () => {
+            logMessage("Initiating Bluetooth device scan...");
+            deviceList.innerHTML = '<h3>Discovered Devices:</h3><p>Scanning...</p>'; // Clear and show scanning status
+            connectButton.disabled = true; // Disable connect button during scan
+            selectedDeviceAddress = null;
+            selectedDeviceName = null;
+            
+            try {
+                // Sending the 'scan_devices' command to the native host via the extension
+                const response = await sendMessageToExtension({
+                    command: "scan_devices",
+                    options: { timeout: 15 } // Scan for 15 seconds
+                });
+
+                if (response.status === "success" && response.devices && response.devices.length > 0) {
+                    deviceList.innerHTML = '<h3>Discovered Devices:</h3>';
+                    response.devices.forEach(device => {
+                        const deviceDiv = document.createElement('div');
+                        deviceDiv.className = 'device-item';
+                        deviceDiv.textContent = `${device.name || 'Unknown Device'} (${device.address})`;
+                        deviceDiv.dataset.address = device.address;
+                        deviceDiv.dataset.name = device.name || 'Unknown Device';
+                        deviceDiv.addEventListener('click', () => selectDevice(device.address, device.name, deviceDiv));
+                        deviceList.appendChild(deviceDiv);
+                    });
+                    logMessage(`Found ${response.devices.length} devices. Select one to connect.`);
+                } else if (response.status === "success" && response.devices && response.devices.length === 0) {
+                    deviceList.innerHTML = '<h3>Discovered Devices:</h3><p>No devices found.</p>';
+                    logMessage("No Bluetooth devices found during scan.", 'warning');
+                } else {
+                    deviceList.innerHTML = '<h3>Discovered Devices:</h3><p>Error during scan.</p>';
+                    logMessage(`Error during device scan: ${response.message}`, 'error');
+                }
+            } catch (error) {
+                deviceList.innerHTML = '<h3>Discovered Devices:</h3><p>Error during scan.</p>';
+                logMessage(`Exception during device scan: ${error.message}`, 'error');
+            }
+        });
+
+        // Handle connect button click
+        connectButton.addEventListener('click', async () => {
+            if (!selectedDeviceAddress) {
+                logMessage("No device selected for connection.", 'warning');
+                return;
+            }
+            logMessage(`Attempting to connect to ${selectedDeviceName || selectedDeviceAddress}...`);
+            try {
+                const response = await sendMessageToExtension({
+                    command: "connect_device",
+                    address: selectedDeviceAddress
+                });
+
+                if (response.status === "success") {
+                    logMessage(`Successfully connected to ${selectedDeviceName || selectedDeviceAddress}!`, 'info');
+                } else {
+                    logMessage(`Failed to connect to ${selectedDeviceName || selectedDeviceAddress}: ${response.message}`, 'error');
+                }
+            } catch (error) {
+                logMessage(`Exception during connection to ${selectedDeviceName || selectedDeviceAddress}: ${error.message}`, 'error');
+            }
+        });
+
+        // Add CSS for device selection highlighting
+        const style = document.createElement('style');
+        style.innerHTML = `
+            .device-item {
+                padding: 5px;
+                margin-bottom: 3px;
+                border: 1px solid #ddd;
+                cursor: pointer;
+            }
+            .device-item:hover {
+                background-color: #f0f0f0;
+            }
+            .device-item.selected-device {
+                background-color: #cceeff;
+                border-color: #007bff;
+                font-weight: bold;
+            }
+        `;
+        document.head.appendChild(style);
+
+
+    </script>
+</body>
+</html>
