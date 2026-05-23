@@ -191,7 +191,6 @@ function connectNativeHost() {
         port = browser.runtime.connectNative(HOST_NAME);
         reconnectAttempts = 0; // Reset attempts on successful connection
         console.log("Connected to native host.");
-        updateScanningState();
     } catch (e) {
         console.error("Failed to connect to native host:", e);
         scheduleReconnect();
@@ -248,6 +247,9 @@ function connectNativeHost() {
         port = null;
         scheduleReconnect();
     });
+
+    // Restore scanning state now that both listeners are registered
+    updateScanningState();
 }
 
 function scheduleReconnect() {

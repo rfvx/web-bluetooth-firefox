@@ -575,10 +575,12 @@
                     const item = document.createElement('div');
                     item.className = 'device-item device-selector-item';
                     item.dataset.id = dev.id;
-                    item.innerHTML = `
-                        <strong>${dev.name || 'Unknown'}</strong>
-                        <span>${dev.id}</span>
-                    `;
+                    const strong = document.createElement('strong');
+                    strong.textContent = dev.name || 'Unknown';
+                    const span = document.createElement('span');
+                    span.textContent = dev.id;
+                    item.appendChild(strong);
+                    item.appendChild(span);
                     item.onclick = () => selectAuthorizedDevice(dev);
                     authorizedList.appendChild(item);
                 });
@@ -623,12 +625,12 @@
                 setStatus("Connected", "status-connected");
                 updateGattControls(true);
 
-                // Setup disconnect listener
-                activeDevice.addEventListener('gattserverdisconnected', () => {
+                // Use the IDL setter so reconnect clicks replace rather than stack listeners
+                activeDevice.ongattserverdisconnected = () => {
                     log("GATT Server disconnected natively.", "warning");
                     setStatus("Disconnected", "status-error");
                     updateGattControls(false);
-                });
+                };
             } catch (err) {
                 log(`GATT Connection failed: ${err.message}`, "error");
                 setStatus("Connection Fail", "status-error");
