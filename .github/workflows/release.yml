@@ -1,0 +1,47 @@
+name: Release to AMO
+
+# Trigger by pushing a version tag: git tag v1.0 && git push origin v1.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to create GitHub Release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install web-ext
+        run: npm install -g web-ext
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .xpi
+        run: bash build-xpi.sh "webbluetooth-for-firefox-${{ steps.version.outputs.version }}.xpi"
+
+      - name: Sign and submit to AMO
+        run: |
+          web-ext sign \
+            --source-dir webbluetooth-firefox-extension \
+            --artifacts-dir signed/ \
+            --channel listed \
+            --api-key "${{ secrets.AMO_ISSUER }}" \
+            --api-secret "${{ secrets.AMO_SECRET }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            webbluetooth-for-firefox-${{ steps.version.outputs.version }}.xpi
+            signed/*.xpi
+          generate_release_notes: true
