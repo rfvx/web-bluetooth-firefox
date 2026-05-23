@@ -11,7 +11,11 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "webbluetooth@rfvx.github.io",
-      "strict_min_version": "109.0"
+      "strict_min_version": "109.0",
+      "data_collection_permissions": {
+        "required": [],
+        "optional": []
+      }
     }
   },
   "icons": {
@@ -19,14 +23,18 @@
     "96": "icons/icon-96.png"
   },
   "background": {
-    "scripts": ["background.js"]
+    "scripts": [
+      "background.js"
+    ]
   },
   "content_scripts": [
     {
       "matches": [
         "<all_urls>"
       ],
-      "js": ["content-script.js"],
+      "js": [
+        "content-script.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
     },
@@ -34,7 +42,9 @@
       "matches": [
         "<all_urls>"
       ],
-      "js": ["polyfill.js"],
+      "js": [
+        "polyfill.js"
+      ],
       "run_at": "document_start",
       "all_frames": true,
       "world": "MAIN"
