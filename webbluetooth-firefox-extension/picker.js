@@ -136,6 +136,9 @@ btnCancel.onclick = () => {
 
 btnPair.onclick = () => {
     if (selectedDevice) {
+        btnPair.disabled = true;
+        btnCancel.disabled = true;
+        statusText.textContent = 'Pairing…';
         port.postMessage({
             command: "select_device",
             address: selectedDevice.address,

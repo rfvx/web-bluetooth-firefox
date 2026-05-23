@@ -296,6 +296,7 @@ function handleHostEvent(event) {
         }
     } else if (event.event === "device_disconnected") {
         notificationSubscriptions.delete(event.address);
+        for (const addrs of tabConnections.values()) addrs.delete(event.address);
         const originMappings = addressToObfuscatedId.get(event.address);
         if (originMappings) {
             for (const [origin, obfuscatedId] of originMappings.entries()) {

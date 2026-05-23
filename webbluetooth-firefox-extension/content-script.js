@@ -3,7 +3,7 @@
 // --- Message Bridging between Page and Background Script ---
 
 window.addEventListener('message', async (event) => {
-    if (event.source === window && event.data && event.data.type === 'FROM_PAGE') {
+    if (event.source === window && event.origin === window.location.origin && event.data && event.data.type === 'FROM_PAGE') {
         const { id, payload } = event.data;
         try {
             const response = await browser.runtime.sendMessage(payload);
@@ -11,13 +11,13 @@ window.addEventListener('message', async (event) => {
                 type: 'FROM_CONTENT_SCRIPT',
                 id: id,
                 response: response
-            }, '*');
+            }, window.location.origin);
         } catch (error) {
             window.postMessage({
                 type: 'FROM_CONTENT_SCRIPT',
                 id: id,
                 error: error.message || 'Unknown error in content script relay.'
-            }, '*');
+            }, window.location.origin);
         }
     }
 });
@@ -28,7 +28,7 @@ browser.runtime.onMessage.addListener((message) => {
             type: 'FROM_CONTENT_SCRIPT',
             event: message.event,
             data: message.data
-        }, '*');
+        }, window.location.origin);
     }
 });
 

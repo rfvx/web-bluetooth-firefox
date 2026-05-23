@@ -450,6 +450,12 @@ if (!navigator.bluetooth) {
             });
             if (r.status !== "success") throw new Error(r.message || "Failed to write characteristic");
         }
+        get oncharacteristicvaluechanged() { return this._oncharacteristicvaluechanged ?? null; }
+        set oncharacteristicvaluechanged(fn) {
+            if (this._oncharacteristicvaluechanged) this.removeEventListener('characteristicvaluechanged', this._oncharacteristicvaluechanged);
+            this._oncharacteristicvaluechanged = fn;
+            if (fn) this.addEventListener('characteristicvaluechanged', fn);
+        }
         async startNotifications() {
             const r = await sendMessageFromPolyfill('start_notify', { address: this.service.device.id, service_uuid: this.service.uuid, char_uuid: this.uuid });
             if (r.status !== "success") throw new Error(r.message || "Failed to start notifications");
@@ -574,20 +580,32 @@ if (!navigator.bluetooth) {
     });
 
     class BluetoothDevice extends BluetoothEventTarget {
-        constructor(id, name) { 
-            super(); 
-            this.id = id; 
-            this.name = name; 
-            this.gatt = new BluetoothRemoteGATTServer(this); 
-            deviceRegistry.set(id, this); 
+        constructor(id, name) {
+            super();
+            this.id = id;
+            this.name = name;
+            this.gatt = new BluetoothRemoteGATTServer(this);
+            deviceRegistry.set(id, this);
         }
-        async watchAdvertisements() { 
-            await sendMessageFromPolyfill('watch_advertisements', { address: this.id }); 
-            return true; 
+        get ongattserverdisconnected() { return this._ongattserverdisconnected ?? null; }
+        set ongattserverdisconnected(fn) {
+            if (this._ongattserverdisconnected) this.removeEventListener('gattserverdisconnected', this._ongattserverdisconnected);
+            this._ongattserverdisconnected = fn;
+            if (fn) this.addEventListener('gattserverdisconnected', fn);
         }
-        async forget() { 
+        get onadvertisementreceived() { return this._onadvertisementreceived ?? null; }
+        set onadvertisementreceived(fn) {
+            if (this._onadvertisementreceived) this.removeEventListener('advertisementreceived', this._onadvertisementreceived);
+            this._onadvertisementreceived = fn;
+            if (fn) this.addEventListener('advertisementreceived', fn);
+        }
+        async watchAdvertisements() {
+            await sendMessageFromPolyfill('watch_advertisements', { address: this.id });
+            return true;
+        }
+        async forget() {
             await sendMessageFromPolyfill('forget_device', { address: this.id });
-            deviceRegistry.delete(this.id); 
+            deviceRegistry.delete(this.id);
         }
     }
 

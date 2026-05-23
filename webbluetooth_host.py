@@ -186,34 +186,6 @@ async def handle_command(command_data):
             except Exception:
                 return {"status": "success", "available": False}
 
-        elif command == "scan_devices":
-            try:
-                timeout = float(options.get("timeout", 10))
-            except (TypeError, ValueError):
-                timeout = 10.0
-            devices = await BleakScanner.discover(timeout=timeout)
-            device_list = []
-            for d in devices:
-                uuids = []
-                metadata = getattr(d, 'metadata', {})
-                if isinstance(metadata, dict):
-                    uuids.extend(metadata.get("uuids", []))
-                details = getattr(d, 'details', {})
-                if isinstance(details, dict):
-                    props = details.get("props", {}) if "props" in details else details
-                    if isinstance(props, dict):
-                        uuids.extend(props.get("UUIDs", []))
-                unique_uuids = list(set(normalize_uuid(u) for u in uuids if u is not None))
-                # Filter out None values that might result from normalize_uuid failing
-                unique_uuids = [u for u in unique_uuids if u is not None]
-                
-                device_list.append({
-                    "name": d.name or "Unknown",
-                    "address": d.address,
-                    "uuids": unique_uuids
-                })
-            return {"status": "success", "devices": device_list}
-
         elif command == "connect_device":
             is_valid, error_msg = validate_param("address", address, required=True, custom_validation=lambda x: re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", x))
             if not is_valid:
@@ -224,8 +196,7 @@ async def handle_command(command_data):
                 client = BleakClient(address, disconnected_callback=on_disconnection, timeout=20.0)
                 try:
                     await client.connect()
-                    # Ensure services are loaded immediately
-                    await client.get_services()
+                    await asyncio.wait_for(client.get_services(), timeout=20.0)
                     connected_clients[address] = client
                     return {"status": "success", "address": address}
                 except Exception as e:

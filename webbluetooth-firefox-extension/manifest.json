@@ -4,7 +4,9 @@
   "version": "1.0",
   "description": "Enables WebBluetooth functionality for Firefox on Linux.",
   "permissions": [
-    "nativeMessaging"
+    "nativeMessaging",
+    "storage",
+    "webNavigation"
   ],
   "browser_specific_settings": {
     "gecko": {
