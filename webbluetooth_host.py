@@ -6,6 +6,7 @@ import struct
 import asyncio
 from base64 import b64encode, b64decode
 import logging
+import time
 
 # Regex for validating standard UUID formats
 UUID_RE = re.compile(
@@ -127,6 +128,7 @@ async def handle_command(command_data):
     address = command_data.get("address")
     service_uuid = normalize_uuid(command_data.get("service_uuid"))
     char_uuid = normalize_uuid(command_data.get("char_uuid"))
+    descriptor_uuid = normalize_uuid(command_data.get("descriptor_uuid"))
     value_b64 = command_data.get("value")
     with_response = command_data.get("response", False)
 
@@ -161,7 +163,7 @@ async def handle_command(command_data):
         return True, None
 
     # Validate common parameters
-    if command not in ["check_availability", "scan_devices", "watch_advertisements", "stop_watch_advertisements"]:
+    if command not in ["check_availability", "watch_advertisements", "stop_watch_advertisements"]:
         # All other commands require a valid address
         if not address:
             return {"status": "error", "message": "Device address is required."}
@@ -482,7 +484,6 @@ async def handle_command(command_data):
 
             if advertisement_scanner is None:
                 logging.info("Starting advertisement scanner.")
-                import time
                 def advertisement_callback(device, advertisement_data):
                     now = time.time()
                     if now - advertisement_cache.get(device.address, 0) < ADVERTISEMENT_THROTTLE_INTERVAL:
@@ -492,8 +493,8 @@ async def handle_command(command_data):
                         _loop.call_soon_threadsafe(_cleanup_advertisement_cache)
                     
                     mdata = {}
-                    for id, data in advertisement_data.manufacturer_data.items():
-                        mdata[f"0x{id:04x}"] = b64encode(data).decode('utf-8')
+                    for mfr_id, data in advertisement_data.manufacturer_data.items():
+                        mdata[f"0x{mfr_id:04x}"] = b64encode(data).decode('utf-8')
                     sdata = {}
                     for uuid, data in advertisement_data.service_data.items():
                         sdata[uuid] = b64encode(data).decode('utf-8')

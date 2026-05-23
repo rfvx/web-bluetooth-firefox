@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Select Bluetooth Device</title>
+    <link rel="stylesheet" href="picker.css">
+</head>
+<body>
+    <div class="glass-container">
+        <header>
+            <div class="bluetooth-glow-icon">
+                <svg viewBox="0 0 24 24" width="32" height="32">
+                    <path fill="currentColor" d="M7,17 L17,7 L12,2 L12,22 L17,17 L7,7" />
+                </svg>
+            </div>
+            <h1>Bluetooth Device Chooser</h1>
+            <div class="scan-status-container">
+                <span class="status-dot pulsing"></span>
+                <span id="status-text">Scanning for devices...</span>
+            </div>
+        </header>
+
+        <main id="device-list" class="device-list">
+            <!-- Discovered devices will be inserted here dynamically -->
+            <div class="empty-state" id="empty-state">
+                <p>Searching for nearby Bluetooth devices...</p>
+                <div class="spinner"></div>
+            </div>
+        </main>
+
+        <footer>
+            <button id="btn-cancel" class="btn btn-secondary">Cancel</button>
+            <button id="btn-pair" class="btn btn-primary" disabled>Pair Device</button>
+        </footer>
+    </div>
+
+    <script src="picker.js"></script>
+</body>
+</html>

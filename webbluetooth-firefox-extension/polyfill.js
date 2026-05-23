@@ -291,7 +291,10 @@ if (!navigator.bluetooth) {
 
     class BluetoothEventTarget {
         constructor() { this._listeners = {}; }
-        addEventListener(t, c) { (this._listeners[t] = this._listeners[t] || []).push(c); }
+        addEventListener(t, c) {
+            if (!this._listeners[t]) this._listeners[t] = [];
+            if (!this._listeners[t].includes(c)) this._listeners[t].push(c);
+        }
         removeEventListener(t, c) {
             if (!this._listeners[t]) return;
             const i = this._listeners[t].indexOf(c);
