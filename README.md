@@ -1,62 +1,90 @@
-# WebBT for Firefox (Linux & Windows)
+# WebBluetooth for Firefox
 
-This extension enables Web Bluetooth in Firefox. It provides a bridge between the browser and the system's Bluetooth adapter using a native messaging host.
+Enables the [Web Bluetooth API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Bluetooth_API) in Firefox on Linux. Chrome supports `navigator.bluetooth` natively; Firefox does not — this extension bridges the gap via a native messaging host.
 
-## Architecture
+## Quick Install
 
-This project consists of three main components:
+### Step 1 — Native host (one command, no interaction)
 
-1.  **Polyfill (`polyfill.js`):** Injected into webpages to provide the `navigator.bluetooth` API. It handles the Web Bluetooth logic and communicates with the extension.
-2.  **WebExtension:** Acts as a relay between the polyfill and the native messaging host. It manages permissions and event routing.
-3.  **Native Messaging Host:**
-    *   **Linux:** A Python script (`webbluetooth_host.py`) using the `bleak` library to interact with BlueZ.
-    *   **Windows:** A C++ executable (`BLEServer.exe`) using Windows Runtime APIs.
-
-## Linux Installation
-
-### 1. Prerequisites
-Ensure you have Python 3 and the necessary Bluetooth libraries installed:
 ```bash
-sudo apt install python3 python3-pip bluez libbluetooth-dev
-pip3 install bleak
+bash <(curl -fsSL https://raw.githubusercontent.com/rfvx/web-bluetooth-firefox/main/install.sh)
 ```
 
-### 2. Register the Native Messaging Host
-Firefox needs a manifest file to know how to launch the Python host.
+Or, if you've already cloned the repo:
+
 ```bash
-# Create the directory if it doesn't exist
-mkdir -p ~/.mozilla/native-messaging-hosts/
-
-# Create a symlink to the host manifest
-ln -s $(pwd)/webbluetooth_host.json ~/.mozilla/native-messaging-hosts/webbluetooth_host.json
-
-# Ensure the host script is executable
-chmod +x webbluetooth_host.py
+bash install.sh
 ```
 
-### 3. Install the Extension
-1.  Open Firefox and go to `about:debugging#/runtime/this-firefox`.
-2.  Click **Load Temporary Add-on...**.
-3.  Select the `manifest.json` file inside the `webbluetooth-firefox-extension` directory.
+This installs the Python `bleak` dependency and registers the host with Firefox. No `sudo` needed.
+
+### Step 2 — Browser extension
+
+**From the Firefox Add-on Store (recommended):**
+> [Install WebBluetooth for Firefox on AMO](https://addons.mozilla.org/firefox/addon/webbluetooth-for-firefox/)
+
+**From a local `.xpi` file:**
+1. Download `webbluetooth-for-firefox-1.0.xpi` from the [Releases page](https://github.com/rfvx/web-bluetooth-firefox/releases).
+2. In Firefox: `about:addons` → gear icon → **Install Add-on From File** → select the `.xpi`.
+
+That's it. Visit any site that uses `navigator.bluetooth` — a device picker will appear automatically.
+
+---
+
+## Requirements
+
+- Firefox 109+
+- Python 3.8+ (`python3`)
+- BlueZ (standard on most Linux distros; included in `bluez` package)
 
 ## Features
 
-- [x] **Graphical Device Picker:** A user-friendly modal to select Bluetooth devices.
-- [x] **GATT Operations:** Support for `readValue`, `writeValueWithResponse`, and `writeValueWithoutResponse`.
-- [x] **Notifications:** Real-time characteristic notifications (e.g., heart rate, Meshtastic data).
-- [x] **Filtering:** Basic device filtering by Service UUID and name.
-- [x] **Disconnection Handling:** Automatic detection and notification of device disconnections.
+- **Device picker** — graphical chooser that appears when a site calls `requestDevice()`
+- **GATT operations** — `readValue`, `writeValue`, descriptors
+- **Notifications** — real-time characteristic notifications
+- **Advertisement watching** — `watchAdvertisements()` API support
+- **Device filtering** — by service UUID, name, or name prefix
+- **Privacy** — real MAC addresses are never exposed to webpages; only per-origin obfuscated IDs
+- **Disconnection handling** — automatic `gattserverdisconnected` events
+
+## Architecture
+
+```
+Webpage JS  ←─postMessage─→  content-script.js  ←─runtime.sendMessage─→  background.js  ←─stdio─→  webbluetooth_host.py
+```
+
+- **`polyfill.js`** (MAIN world) — implements `navigator.bluetooth` on the page
+- **`content-script.js`** (isolated world) — relays messages between page and background
+- **`background.js`** — security hub: device authorization, service permission checks, picker management
+- **`webbluetooth_host.py`** — Python native messaging host using `bleak` / BlueZ
+
+See [CLAUDE.md](CLAUDE.md) for a full architecture reference.
 
 ## Troubleshooting
 
-1.  **"Web Bluetooth API is available" but no devices found:**
-    *   Ensure your Bluetooth adapter is turned on and visible.
-    *   Check if the Python host is running: `ps aux | grep webbluetooth_host.py`.
-2.  **Permissions Error:**
-    *   Ensure your user is in the `bluetooth` group (on some distros): `sudo usermod -aG bluetooth $USER` (relog required).
-3.  **Native host not connected:**
-    *   Verify the path in `webbluetooth_host.json` points correctly to your `webbluetooth_host.py` script.
+**"No devices found" / scan never returns results**
+- Make sure your Bluetooth adapter is on: `bluetoothctl show`
+- On some distros, add yourself to the `bluetooth` group:
+  ```bash
+  sudo usermod -aG bluetooth $USER
+  ```
+  Then log out and back in.
+
+**"Native host is not connected"**
+- Re-run `install.sh` — it regenerates the NMH manifest with the correct path.
+- Check the manifest was written: `cat ~/.mozilla/native-messaging-hosts/webbluetooth_host.json`
+
+**Web Bluetooth not available at all**
+- The API requires a **secure context** (HTTPS, `localhost`, or `moz-extension://`).
+
+## Building the .xpi locally
+
+```bash
+bash build-xpi.sh
+```
+
+Produces `webbluetooth-for-firefox-1.0.xpi`. Upload to [AMO](https://addons.mozilla.org/developers/addon/submit/) for signing.
 
 ## Credits
 
-This project is based on the [Web Bluetooth Polyfill](https://github.com/urish/web-bluetooth-polyfill) and has been expanded to support Linux and modern Web Bluetooth applications like the Meshtastic client.
+Based on the [web-bluetooth-polyfill](https://github.com/urish/web-bluetooth-polyfill) by Uri Shaked, extended with Linux BlueZ support, a graphical device picker, security hardening, and advertisement watching.

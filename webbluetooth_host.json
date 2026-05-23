@@ -1,9 +1,9 @@
 {
   "name": "webbluetooth_host",
   "description": "WebBluetooth Native Messaging Host",
-  "path": "/home/theuser/WebBluetoothFirefox/webbluetooth_host.py",
+  "path": "/REPLACE_WITH_ABSOLUTE_PATH/webbluetooth_host.py",
   "type": "stdio",
   "allowed_extensions": [
-    "webbluetooth-firefox-extension@example.com"
+    "webbluetooth@rfvx.github.io"
   ]
 }
