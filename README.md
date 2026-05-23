@@ -1,6 +1,6 @@
 # WebBluetooth for Firefox
 
-Enables the [Web Bluetooth API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Bluetooth_API) in Firefox on Linux. Chrome supports `navigator.bluetooth` natively; Firefox does not — this extension bridges the gap via a native messaging host.
+Enables the [Web Bluetooth API](https://developer.mozilla.org/en-US/docs/Web/API/Web_Bluetooth_API) in Firefox on Linux, which allows for the use of websites which access external Bluetooth devices. Chrome supports `navigator.bluetooth` natively; Firefox does not — this extension bridges the gap via a native messaging host. *Disclosure*: this project has so far been completely made with Generative AI.
 
 ## Quick Install
 
@@ -16,18 +16,15 @@ Or, if you've already cloned the repo:
 bash install.sh
 ```
 
-This installs the Python `bleak` dependency and registers the host with Firefox. No `sudo` needed.
 
 ### Step 2 — Browser extension
 
 **From the Firefox Add-on Store (recommended):**
-> [Install WebBluetooth for Firefox on AMO](https://addons.mozilla.org/firefox/addon/webbluetooth-for-firefox/)
+> [Install WebBluetooth for Firefox on the Mozilla addons store](https://addons.mozilla.org/firefox/addon/webbluetooth-for-firefox/)
 
 **From a local `.xpi` file:**
 1. Download `webbluetooth-for-firefox-1.0.xpi` from the [Releases page](https://github.com/rfvx/web-bluetooth-firefox/releases).
 2. In Firefox: `about:addons` → gear icon → **Install Add-on From File** → select the `.xpi`.
-
-That's it. Visit any site that uses `navigator.bluetooth` — a device picker will appear automatically.
 
 ---
 
