@@ -217,7 +217,8 @@ async def handle_command(command_data):
                     client = connected_clients[address]
                     if client.is_connected:
                         await client.disconnect()
-                    del connected_clients[address]
+                    # on_disconnection may have already removed the key; pop is safe
+                    connected_clients.pop(address, None)
                 return {"status": "success", "address": address}
 
         elif command == "get_primary_services":
