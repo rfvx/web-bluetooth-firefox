@@ -192,19 +192,6 @@ function connectNativeHost() {
         reconnectAttempts = 0; // Reset attempts on successful connection
         console.log("Connected to native host.");
         updateScanningState();
-        
-        // Re-subscribe to notifications if any
-        for (const [address, charSubs] of notificationSubscriptions.entries()) {
-            for (const subKey of charSubs.keys()) {
-                const [serviceUuid, charUuid] = subKey.split('|');
-                port.postMessage({
-                    command: "start_notify",
-                    address: address,
-                    service_uuid: serviceUuid === 'null' ? null : serviceUuid,
-                    char_uuid: charUuid
-                });
-            }
-        }
     } catch (e) {
         console.error("Failed to connect to native host:", e);
         scheduleReconnect();
@@ -236,8 +223,28 @@ function connectNativeHost() {
             if (reject) reject(new Error("Native host disconnected."));
         }
         pendingWebRequests.clear();
-        notificationSubscriptions.clear(); // Clear subscriptions on host disconnect
-        isScanning = false; // Reset scanning state tracking
+        notificationSubscriptions.clear();
+        isScanning = false;
+
+        // Notify each tab that had an active GATT connection so the polyfill
+        // can update device.gatt.connected and fire gattserverdisconnected.
+        for (const [tabId, addrs] of tabConnections.entries()) {
+            for (const address of addrs) {
+                const originMappings = addressToObfuscatedId.get(address);
+                if (!originMappings) continue;
+                const origin = tabIdToOrigin.get(tabId);
+                if (!origin) continue;
+                const obfuscatedId = originMappings.get(origin);
+                if (!obfuscatedId) continue;
+                browser.tabs.sendMessage(tabId, {
+                    type: "host_event",
+                    event: "device_disconnected",
+                    data: { address: obfuscatedId }
+                }).catch(() => {});
+            }
+        }
+        tabConnections.clear();
+
         port = null;
         scheduleReconnect();
     });

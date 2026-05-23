@@ -6,6 +6,9 @@ const tabId = params.get('tabId');
 if (!requestId) {
     console.error("No request ID provided to Bluetooth picker.");
     document.getElementById('status-text').textContent = "Error: Invalid request context.";
+    document.getElementById('btn-cancel').onclick = () => window.close();
+    document.getElementById('btn-pair').disabled = true;
+    throw new Error("Missing requestId — halting picker script.");
 }
 
 const deviceList = document.getElementById('device-list');

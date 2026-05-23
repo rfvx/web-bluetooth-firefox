@@ -512,6 +512,10 @@
             btnRead.disabled = !connected;
             btnWrite.disabled = !connected;
             btnNotify.disabled = !connected;
+            if (!connected) {
+                isNotifying = false;
+                btnNotify.textContent = 'Toggle Notify';
+            }
         }
 
         // 1. Availability check

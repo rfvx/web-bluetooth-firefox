@@ -125,7 +125,6 @@ async def handle_command(command_data):
     global advertisement_scanner
     command = command_data.get("command")
     address = command_data.get("address")
-    options = command_data.get("options", {})
     service_uuid = normalize_uuid(command_data.get("service_uuid"))
     char_uuid = normalize_uuid(command_data.get("char_uuid"))
     value_b64 = command_data.get("value")
@@ -178,6 +177,8 @@ async def handle_command(command_data):
 
     try:
         if command == "check_availability":
+            if advertisement_scanner is not None:
+                return {"status": "success", "available": True}
             try:
                 scanner = BleakScanner()
                 await scanner.start()
