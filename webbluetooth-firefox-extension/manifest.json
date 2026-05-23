@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "WebBluetooth Extension",
+  "name": "WebBluetooth for Firefox",
   "version": "1.0",
-  "description": "Enables WebBluetooth functionality for Firefox on Linux.",
+  "description": "Enables the Web Bluetooth API in Firefox on Linux, bridging the browser to Bluetooth hardware via a native messaging host.",
   "permissions": [
     "nativeMessaging",
     "storage",
@@ -10,8 +10,13 @@
   ],
   "browser_specific_settings": {
     "gecko": {
-      "id": "webbluetooth-firefox-extension@example.com"
+      "id": "webbluetooth@rfvx.github.io",
+      "strict_min_version": "109.0"
     }
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
   },
   "background": {
     "scripts": ["background.js"]
