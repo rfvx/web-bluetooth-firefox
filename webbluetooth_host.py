@@ -1,289 +1,678 @@
 #!/usr/bin/env python3
 import sys
+import re
 import json
 import struct
 import asyncio
-from bleak import BleakScanner, BleakClient
 from base64 import b64encode, b64decode
 import logging
+
+# Regex for validating standard UUID formats
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" # 128-bit
+)
+
+def is_valid_uuid_format(uuid_string):
+    """Checks if a string is a valid 128-bit UUID format."""
+    if not isinstance(uuid_string, str):
+        return False
+    return bool(UUID_RE.fullmatch(uuid_string.lower()))
 
 # Setup basic logging to stderr for debugging
 logging.basicConfig(level=logging.DEBUG, stream=sys.stderr, format='%(asctime)s - %(levelname)s - %(message)s')
 
+try:
+    from bleak import BleakScanner, BleakClient
+except ImportError:
+    logging.critical("Bleak library not found. Please install it with 'pip install bleak'.")
+    sys.exit(1)
+
 # Mapping for active BLE connections (device_address -> BleakClient instance)
 connected_clients = {}
+# Per-device locks to serialize GATT operations
+device_locks = {}
+
+# Global scanner instance for advertisement watching
+advertisement_scanner = None
+# Cache for throttling advertisements (address -> last_sent_timestamp)
+advertisement_cache = {}
+MAX_ADVERTISEMENT_CACHE_SIZE = 1000
+ADVERTISEMENT_THROTTLE_INTERVAL = 0.1 # seconds
+GATT_TIMEOUT = 10.0  # seconds for individual GATT operations
+
+# Module-level reference to the running asyncio event loop (set in main_loop)
+_loop = None
 
 # Structure to hold notification subscriptions
 # device_address -> { char_uuid: notification_callback_id }
 notification_subscriptions = {}
 
-def send_message(message_content):
-    try:
-        encoded_content = json.dumps(message_content).encode('utf-8')
-        encoded_length = struct.pack('@I', len(encoded_content))
-        sys.stdout.buffer.write(encoded_length)
-        sys.stdout.buffer.write(encoded_content)
-        sys.stdout.buffer.flush()
-        logging.debug(f"Sent message: {message_content}")
-    except Exception as e:
-        logging.error(f"Failed to send message: {e}")
+# Lock for serializing access to stdout
+send_lock = asyncio.Lock()
+
+def normalize_uuid(uuid):
+    """Ensure UUID is in standard 128-bit lowercase format.
+    Returns None if the input is not a valid UUID format after normalization attempts."""
+    if not uuid:
+        return None
+    
+    u_str = None
+    if isinstance(uuid, int):
+        u_str = f"{uuid:x}"
+    else:
+        u_str = str(uuid).lower().replace('-', '')
+        if u_str.startswith('0x'):
+            u_str = u_str[2:]
+            
+    # Attempt to convert 16-bit or 32-bit UUIDs to 128-bit format
+    if len(u_str) == 4: # 16-bit
+        normalized_uuid = f"0000{u_str}-0000-1000-8000-00805f9b34fb"
+    elif len(u_str) == 8: # 32-bit
+        normalized_uuid = f"{u_str}-0000-1000-8000-00805f9b34fb"
+    elif len(u_str) == 32: # Already a 128-bit hex string
+        normalized_uuid = f"{u_str[0:8]}-{u_str[8:12]}-{u_str[12:16]}-{u_str[16:20]}-{u_str[20:]}"
+    else:
+        # If it's not 4, 8, or 32 hex chars, it's not a standard GATT UUID format we can normalize
+        logging.debug(f"UUID '{uuid}' has an unhandled length for normalization: {len(u_str)}")
+        return None
+
+    if is_valid_uuid_format(normalized_uuid):
+        return normalized_uuid
+    else:
+        logging.warning(f"Normalized UUID '{normalized_uuid}' (from original '{uuid}') failed final validation.")
+        return None
+
+async def send_message(message_content):
+    async with send_lock:
+        try:
+            encoded_content = json.dumps(message_content).encode('utf-8')
+            # Use '=' for native byte order and standard 32-bit size
+            encoded_length = struct.pack('=I', len(encoded_content))
+            sys.stdout.buffer.write(encoded_length)
+            sys.stdout.buffer.write(encoded_content)
+            sys.stdout.buffer.flush()
+        except Exception as e:
+            logging.error(f"Failed to send message: {e}")
 
 def on_disconnection(client):
     address = client.address
     logging.info(f"Device {address} disconnected.")
     if address in connected_clients:
         del connected_clients[address]
+    if address in device_locks:
+        del device_locks[address]
     if address in notification_subscriptions:
         del notification_subscriptions[address]
-    send_message({
-        "event": "device_disconnected",
-        "address": address
-    })
+    
+    if _loop and _loop.is_running():
+        try:
+            _loop.call_soon_threadsafe(_loop.create_task, send_message({
+                "event": "device_disconnected",
+                "address": address
+            }))
+        except Exception as e:
+            logging.error(f"Error triggering disconnection message: {e}")
+    else:
+        logging.warning(f"Loop not running, skipping disconnection event for {address}")
+
+def _cleanup_advertisement_cache():
+    if len(advertisement_cache) > MAX_ADVERTISEMENT_CACHE_SIZE:
+        keys = sorted(advertisement_cache.keys(), key=lambda k: advertisement_cache[k])
+        for k in keys[:int(MAX_ADVERTISEMENT_CACHE_SIZE * 0.1)]:
+            advertisement_cache.pop(k, None)
 
 async def handle_command(command_data):
+    global advertisement_scanner
     command = command_data.get("command")
     address = command_data.get("address")
     options = command_data.get("options", {})
-    service_uuid = command_data.get("service_uuid") # For GATT operations
-    char_uuid = command_data.get("char_uuid") # For GATT operations
-    value_b64 = command_data.get("value") # For write operations
-    with_response = command_data.get("response", False) # For write operations
+    service_uuid = normalize_uuid(command_data.get("service_uuid"))
+    char_uuid = normalize_uuid(command_data.get("char_uuid"))
+    value_b64 = command_data.get("value")
+    with_response = command_data.get("response", False)
 
-    logging.debug(f"Received command: {command_data}")
+    # Basic host-side command whitelist
+    ALLOWED_COMMANDS = [
+        "check_availability", "connect_device", "disconnect_device",
+        "get_primary_services", "get_primary_service", "get_characteristics", 
+        "get_descriptors", "read_gatt_char", "write_gatt_char", "start_notify", 
+        "stop_notify", "read_gatt_descriptor", "write_gatt_descriptor",
+        "watch_advertisements", "stop_watch_advertisements"
+    ]
+
+    if command not in ALLOWED_COMMANDS:
+        return {"status": "error", "message": f"Unauthorized or unknown command: {command}"}
+
+    logging.debug(f"Received command: {command}")
+    
+    # Helper for parameter validation
+    def validate_param(param_name, value, required=False, type_check=None, min_len=None, max_len=None, custom_validation=None):
+        if required and (value is None or (isinstance(value, str) and not value.strip())):
+            return False, f"{param_name} is required."
+        if value is not None:
+            if type_check is not None and not isinstance(value, type_check):
+                return False, f"{param_name} must be of type {type_check.__name__}."
+            if isinstance(value, str):
+                if min_len is not None and len(value) < min_len:
+                    return False, f"{param_name} must be at least {min_len} characters long."
+                if max_len is not None and len(value) > max_len:
+                    return False, f"{param_name} cannot exceed {max_len} characters."
+            if custom_validation and not custom_validation(value):
+                return False, f"{param_name} failed custom validation."
+        return True, None
+
+    # Validate common parameters
+    if command not in ["check_availability", "scan_devices", "watch_advertisements", "stop_watch_advertisements"]:
+        # All other commands require a valid address
+        if not address:
+            return {"status": "error", "message": "Device address is required."}
+        # Basic MAC address format validation (example, can be more robust)
+        if not re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", address):
+            return {"status": "error", "message": "Invalid device address format."}
+
+    # Helper to get/create per-device lock
+    def get_lock(addr):
+        if addr not in device_locks:
+            device_locks[addr] = asyncio.Lock()
+        return device_locks[addr]
 
     try:
         if command == "check_availability":
-            return {"status": "success", "available": True}
+            try:
+                scanner = BleakScanner()
+                await scanner.start()
+                await scanner.stop()
+                return {"status": "success", "available": True}
+            except Exception:
+                return {"status": "success", "available": False}
 
         elif command == "scan_devices":
-            timeout = options.get("timeout", 10)
-            logging.debug(f"Scanning for devices with timeout: {timeout}")
-            devices = await BleakScanner(timeout=timeout).discover()
+            try:
+                timeout = float(options.get("timeout", 10))
+            except (TypeError, ValueError):
+                timeout = 10.0
+            devices = await BleakScanner.discover(timeout=timeout)
             device_list = []
             for d in devices:
-                # Aggressively collect UUIDs from all possible places
                 uuids = []
-                
-                # 1. Standard Bleak metadata
                 metadata = getattr(d, 'metadata', {})
                 if isinstance(metadata, dict):
                     uuids.extend(metadata.get("uuids", []))
-                
-                # 2. BlueZ-specific details (D-Bus properties)
                 details = getattr(d, 'details', {})
                 if isinstance(details, dict):
-                    # Check for BlueZ 'UUIDs' property
                     props = details.get("props", {}) if "props" in details else details
                     if isinstance(props, dict):
                         uuids.extend(props.get("UUIDs", []))
-
-                # Normalize and deduplicate
-                unique_uuids = list(set(u.lower() for u in uuids if isinstance(u, str)))
+                unique_uuids = list(set(normalize_uuid(u) for u in uuids if u is not None))
+                # Filter out None values that might result from normalize_uuid failing
+                unique_uuids = [u for u in unique_uuids if u is not None]
                 
                 device_list.append({
                     "name": d.name or "Unknown",
                     "address": d.address,
                     "uuids": unique_uuids
                 })
-            
-            logging.debug(f"Found {len(device_list)} devices. Meshtastic? {'Yes' if any('6ba1b218' in u for dev in device_list for u in dev['uuids']) else 'No'}")
             return {"status": "success", "devices": device_list}
 
         elif command == "connect_device":
-            if not address:
-                return {"status": "error", "message": "Device address is required for connect_device"}
-            
-            logging.debug(f"Attempting to connect to: {address}")
-            if address in connected_clients and connected_clients[address].is_connected:
-                logging.debug(f"Already connected to {address}")
-                return {"status": "success", "message": "Already connected", "address": address}
-            
-            client = BleakClient(address, disconnected_callback=on_disconnection)
-            await client.connect()
-            connected_clients[address] = client
-            logging.debug(f"Successfully connected to {address}")
-            return {"status": "success", "address": address}
+            is_valid, error_msg = validate_param("address", address, required=True, custom_validation=lambda x: re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", x))
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            async with get_lock(address):
+                if address in connected_clients and connected_clients[address].is_connected:
+                    return {"status": "success", "message": "Already connected", "address": address}
+                client = BleakClient(address, disconnected_callback=on_disconnection, timeout=20.0)
+                try:
+                    await client.connect()
+                    # Ensure services are loaded immediately
+                    await client.get_services()
+                    connected_clients[address] = client
+                    return {"status": "success", "address": address}
+                except Exception as e:
+                    logging.error(f"Failed to connect to {address}: {e}")
+                    if client.is_connected:
+                        await client.disconnect()
+                    return {"status": "error", "message": str(e)}
 
         elif command == "disconnect_device":
-            if not address:
-                return {"status": "error", "message": "Device address is required for disconnect_device"}
-            
-            logging.debug(f"Attempting to disconnect from: {address}")
-            if address in connected_clients and connected_clients[address].is_connected:
-                await connected_clients[address].disconnect()
-                # on_disconnection callback will handle cleanup
-                logging.debug(f"Successfully disconnected from {address}")
-            else:
-                logging.warning(f"Attempted to disconnect from {address}, but not connected or client not found.")
-            return {"status": "success", "address": address}
+            is_valid, error_msg = validate_param("address", address, required=True, custom_validation=lambda x: re.match(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", x))
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            async with get_lock(address):
+                if address in connected_clients:
+                    client = connected_clients[address]
+                    if client.is_connected:
+                        await client.disconnect()
+                    del connected_clients[address]
+                return {"status": "success", "address": address}
 
         elif command == "get_primary_services":
-            if not address:
-                return {"status": "error", "message": "Device address is required for get_primary_services"}
             if address not in connected_clients or not connected_clients[address].is_connected:
-                return {"status": "error", "message": f"Not connected to {address}"}
-            
-            client = connected_clients[address]
-            services = [s.uuid for s in client.services]
-            return {"status": "success", "uuids": services}
+                return {"status": "error", "message": "Device not connected."}
+            async with get_lock(address):
+                client = connected_clients[address]
+                services = [s.uuid.lower() for s in client.services]
+                return {"status": "success", "uuids": services}
 
         elif command == "get_primary_service":
-            if not address or not service_uuid:
-                return {"status": "error", "message": "Address and service_uuid are required for get_primary_service"}
+            is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
             if address not in connected_clients or not connected_clients[address].is_connected:
-                return {"status": "error", "message": f"Not connected to {address}"}
-            
-            client = connected_clients[address]
-            service = client.services.get_service(service_uuid)
-            if service:
-                return {"status": "success", "uuid": service.uuid}
-            else:
-                return {"status": "error", "message": f"Service {service_uuid} not found"}
+                return {"status": "error", "message": "Device not connected."}
+            async with get_lock(address):
+                client = connected_clients[address]
+                service = client.services.get_service(service_uuid)
+                if service:
+                    return {"status": "success", "uuid": service.uuid.lower()}
+                return {"status": "error", "message": "Service not found."}
 
         elif command == "get_characteristics":
-            if not address or not service_uuid:
-                return {"status": "error", "message": "Address and service_uuid are required for get_characteristics"}
+            is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
             if address not in connected_clients or not connected_clients[address].is_connected:
-                return {"status": "error", "message": f"Not connected to {address}"}
-            
-            client = connected_clients[address]
-            service = client.services.get_service(service_uuid)
-            if service:
-                chars = [c.uuid for c in service.characteristics]
-                return {"status": "success", "uuids": chars}
-            else:
-                return {"status": "error", "message": f"Service {service_uuid} not found"}
+                return {"status": "error", "message": "Device not connected."}
+            async with get_lock(address):
+                client = connected_clients[address]
+                service = client.services.get_service(service_uuid)
+                if service:
+                    chars = []
+                    for c in service.characteristics:
+                        chars.append({
+                            "uuid": c.uuid.lower(),
+                            "properties": {
+                                "broadcast": "broadcast" in c.properties,
+                                "read": "read" in c.properties,
+                                "writeWithoutResponse": "write-without-response" in c.properties,
+                                "write": "write" in c.properties,
+                                "notify": "notify" in c.properties,
+                                "indicate": "indicate" in c.properties,
+                                "authenticatedSignedWrites": "authenticated-signed-writes" in c.properties,
+                                "reliableWrite": "reliable-write" in c.properties,
+                                "writableAuxiliaries": "writable-auxiliaries" in c.properties
+                            }
+                        })
+                    return {"status": "success", "characteristics": chars}
+                return {"status": "error", "message": "Service not found."}
+
+        elif command == "get_descriptors":
+            is_valid, error_msg = validate_param("char_uuid", command_data.get("char_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            if command_data.get("service_uuid"):
+                is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), custom_validation=is_valid_uuid_format)
+                if not is_valid:
+                    return {"status": "error", "message": error_msg}
+            if address not in connected_clients or not connected_clients[address].is_connected:
+                return {"status": "error", "message": "Device not connected."}
+            async with get_lock(address):
+                client = connected_clients[address]
+                if service_uuid:
+                    service = client.services.get_service(service_uuid)
+                    if not service: return {"status": "error", "message": "Service not found."}
+                    char = service.get_characteristic(char_uuid)
+                else:
+                    char = client.services.get_characteristic(char_uuid)
+                
+                if char:
+                    return {"status": "success", "uuids": [d.uuid.lower() for d in char.descriptors]}
+                return {"status": "error", "message": "Characteristic not found."}
 
         elif command == "read_gatt_char":
-            if not address or not service_uuid or not char_uuid:
-                return {"status": "error", "message": "Address, service_uuid, and char_uuid are required for read_gatt_char"}
-            
+            is_valid, error_msg = validate_param("char_uuid", command_data.get("char_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            if command_data.get("service_uuid"):
+                is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), custom_validation=is_valid_uuid_format)
+                if not is_valid:
+                    return {"status": "error", "message": error_msg}
             if address not in connected_clients or not connected_clients[address].is_connected:
-                return {"status": "error", "message": f"Not connected to {address}"}
-            
+                return {"status": "error", "message": "Device not connected."}
             client = connected_clients[address]
-            logging.debug(f"Reading GATT characteristic {char_uuid} from service {service_uuid} on {address}")
-            value_bytes = await client.read_gatt_char(char_uuid)
-            value_b64 = b64encode(value_bytes).decode('utf-8')
-            logging.debug(f"Read value (base64): {value_b64}")
-            return {"status": "success", "value": value_b64}
+            async with get_lock(address):
+                if service_uuid:
+                    service = client.services.get_service(service_uuid)
+                    if not service: return {"status": "error", "message": "Service not found."}
+                    char = service.get_characteristic(char_uuid)
+                    if not char: return {"status": "error", "message": "Characteristic not found."}
+                    value_bytes = await asyncio.wait_for(client.read_gatt_char(char.handle), timeout=GATT_TIMEOUT)
+                else:
+                    value_bytes = await asyncio.wait_for(client.read_gatt_char(char_uuid), timeout=GATT_TIMEOUT)
+                return {"status": "success", "value": b64encode(value_bytes).decode('utf-8')}
 
         elif command == "write_gatt_char":
-            if not address or not service_uuid or not char_uuid or value_b64 is None:
-                return {"status": "error", "message": "Address, service_uuid, char_uuid, and value are required for write_gatt_char"}
+            is_valid, error_msg = validate_param("char_uuid", command_data.get("char_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            if command_data.get("service_uuid"):
+                is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), custom_validation=is_valid_uuid_format)
+                if not is_valid:
+                    return {"status": "error", "message": error_msg}
+            is_valid, error_msg = validate_param("value", value_b64, required=True, type_check=str)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
             
+            # Max GATT MTU is typically 23 (minus 3 for opcode and handle), but can be higher.
+            # Let's enforce a reasonable limit to prevent DoS with excessively large writes.
+            MAX_WRITE_VALUE_BYTES = 512 # A reasonable upper bound for typical BLE writes
+            try:
+                value_bytes = b64decode(value_b64, validate=True)
+                if len(value_bytes) > MAX_WRITE_VALUE_BYTES:
+                    return {"status": "error", "message": f"Value too large. Max {MAX_WRITE_VALUE_BYTES} bytes allowed."}
+            except Exception:
+                return {"status": "error", "message": "Invalid base64 encoding for value."}
+
             if address not in connected_clients or not connected_clients[address].is_connected:
-                return {"status": "error", "message": f"Not connected to {address}"}
-            
-            logging.debug(f"Writing GATT characteristic {char_uuid} in service {service_uuid} on {address} with value (base64): {value_b64}, response: {with_response}")
-            value_bytes = b64decode(value_b64.encode('utf-8'))
-            await connected_clients[address].write_gatt_char(char_uuid, value_bytes, response=with_response)
-            logging.debug(f"Successfully wrote value to {address}")
-            return {"status": "success"}
+                return {"status": "error", "message": "Device not connected."}
+            client = connected_clients[address]
+            async with get_lock(address):
+                if service_uuid:
+                    service = client.services.get_service(service_uuid)
+                    if not service: return {"status": "error", "message": "Service not found."}
+                    char = service.get_characteristic(char_uuid)
+                    if not char: return {"status": "error", "message": "Characteristic not found."}
+                    await asyncio.wait_for(client.write_gatt_char(char.handle, value_bytes, response=with_response), timeout=GATT_TIMEOUT)
+                else:
+                    await asyncio.wait_for(client.write_gatt_char(char_uuid, value_bytes, response=with_response), timeout=GATT_TIMEOUT)
+                return {"status": "success"}
 
         elif command == "start_notify":
-            if not address or not service_uuid or not char_uuid:
-                return {"status": "error", "message": "Address, service_uuid, and char_uuid are required for start_notify"}
-            
+            is_valid, error_msg = validate_param("char_uuid", command_data.get("char_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            if command_data.get("service_uuid"):
+                is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), custom_validation=is_valid_uuid_format)
+                if not is_valid:
+                    return {"status": "error", "message": error_msg}
             if address not in connected_clients or not connected_clients[address].is_connected:
-                return {"status": "error", "message": f"Not connected to {address}"}
-            
-            logging.debug(f"Starting notifications for GATT characteristic {char_uuid} in service {service_uuid} on {address}")
-            
+                return {"status": "error", "message": "Device not connected."}
+
+            client = connected_clients[address]
+
+            # Find the characteristic first to ensure we have the correct service_uuid
+            char = None
+            if service_uuid:
+                service = client.services.get_service(service_uuid)
+                if service:
+                    char = service.get_characteristic(char_uuid)
+            else:
+                char = client.services.get_characteristic(char_uuid)
+
+            if not char:
+                return {"status": "error", "message": "Characteristic not found."}
+
+            actual_service_uuid = char.service_uuid.lower()
+            actual_char_uuid = char.uuid.lower()
+
             def notification_handler(sender, data):
-                logging.debug(f"Notification received from {sender} ({address}): {b64encode(data).decode('utf-8')}")
-                send_message({
+                # sender can be a BleakGATTCharacteristic or a handle (int)
+                _loop.call_soon_threadsafe(_loop.create_task, send_message({
                     "event": "gatt_notification",
                     "address": address,
-                    "service_uuid": service_uuid,
-                    "char_uuid": char_uuid,
+                    "service_uuid": actual_service_uuid,
+                    "char_uuid": actual_char_uuid,
                     "value": b64encode(data).decode('utf-8')
-                })
+                }))
 
-            if address not in notification_subscriptions:
-                notification_subscriptions[address] = {}
-            
-            if char_uuid not in notification_subscriptions[address]:
-                logging.debug(f"Subscribing to notifications for {char_uuid} on {address}")
-                await connected_clients[address].start_notify(char_uuid, notification_handler)
-                notification_subscriptions[address][char_uuid] = True 
-                logging.debug(f"Notification started for {char_uuid} on {address}")
+            async with get_lock(address):
+                if address not in notification_subscriptions:
+                    notification_subscriptions[address] = {}
+                if actual_char_uuid not in notification_subscriptions[address]:
+                    await asyncio.wait_for(client.start_notify(char.handle, notification_handler), timeout=GATT_TIMEOUT)
+                    notification_subscriptions[address][actual_char_uuid] = True
                 return {"status": "success"}
-            else:
-                logging.debug(f"Already subscribed to notifications for {char_uuid} on {address}")
-                return {"status": "success", "message": "Already subscribed"}
 
         elif command == "stop_notify":
-            if not address or not service_uuid or not char_uuid:
-                return {"status": "error", "message": "Address, service_uuid, and char_uuid are required for stop_notify"}
+            is_valid, error_msg = validate_param("char_uuid", command_data.get("char_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            if command_data.get("service_uuid"):
+                is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), custom_validation=is_valid_uuid_format)
+                if not is_valid:
+                    return {"status": "error", "message": error_msg}
+            if address not in connected_clients or not connected_clients[address].is_connected:
+                return {"status": "error", "message": "Device not connected."}
+            async with get_lock(address):
+                if address in notification_subscriptions and char_uuid in notification_subscriptions[address]:
+                    client = connected_clients[address]
+                    if service_uuid:
+                        service = client.services.get_service(service_uuid)
+                        if not service: return {"status": "error", "message": "Service not found."}
+                        char = service.get_characteristic(char_uuid)
+                        if not char: return {"status": "error", "message": "Characteristic not found."}
+                        await asyncio.wait_for(client.stop_notify(char.handle), timeout=GATT_TIMEOUT)
+                    else:
+                        await asyncio.wait_for(client.stop_notify(char_uuid), timeout=GATT_TIMEOUT)
+                    del notification_subscriptions[address][char_uuid]
+                return {"status": "success"}
+
+        elif command == "read_gatt_descriptor":
+            is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            is_valid, error_msg = validate_param("char_uuid", command_data.get("char_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            is_valid, error_msg = validate_param("descriptor_uuid", command_data.get("descriptor_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            if address not in connected_clients or not connected_clients[address].is_connected:
+                return {"status": "error", "message": "Device not connected."}
+            client = connected_clients[address]
+            async with get_lock(address):
+                service = client.services.get_service(service_uuid)
+                if not service: return {"status": "error", "message": "Service not found."}
+                char = next((c for c in service.characteristics if c.uuid.lower() == char_uuid.lower()), None)
+                if not char: return {"status": "error", "message": "Characteristic not found."}
+                descriptor = next((d for d in char.descriptors if d.uuid.lower() == descriptor_uuid.lower()), None)
+                if not descriptor: return {"status": "error", "message": "Descriptor not found."}
+                value = await asyncio.wait_for(client.read_gatt_descriptor(descriptor.handle), timeout=GATT_TIMEOUT)
+                return {"status": "success", "value": b64encode(value).decode('utf-8')}
+
+        elif command == "write_gatt_descriptor":
+            is_valid, error_msg = validate_param("service_uuid", command_data.get("service_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            is_valid, error_msg = validate_param("char_uuid", command_data.get("char_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            is_valid, error_msg = validate_param("descriptor_uuid", command_data.get("descriptor_uuid"), required=True, custom_validation=is_valid_uuid_format)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+            is_valid, error_msg = validate_param("value", value_b64, required=True, type_check=str)
+            if not is_valid:
+                return {"status": "error", "message": error_msg}
+
+            MAX_WRITE_VALUE_BYTES = 512
+            try:
+                value_bytes = b64decode(value_b64, validate=True)
+                if len(value_bytes) > MAX_WRITE_VALUE_BYTES:
+                    return {"status": "error", "message": f"Value too large. Max {MAX_WRITE_VALUE_BYTES} bytes allowed."}
+            except Exception:
+                return {"status": "error", "message": "Invalid base64 encoding for value."}
             
             if address not in connected_clients or not connected_clients[address].is_connected:
-                return {"status": "error", "message": f"Not connected to {address}"}
+                return {"status": "error", "message": "Device not connected."}
+            client = connected_clients[address]
+            async with get_lock(address):
+                service = client.services.get_service(service_uuid)
+                if not service: return {"status": "error", "message": "Service not found."}
+                char = next((c for c in service.characteristics if c.uuid.lower() == char_uuid.lower()), None)
+                if not char: return {"status": "error", "message": "Characteristic not found."}
+                descriptor = next((d for d in char.descriptors if d.uuid.lower() == descriptor_uuid.lower()), None)
+                if not descriptor: return {"status": "error", "message": "Descriptor not found."}
+                await asyncio.wait_for(client.write_gatt_descriptor(descriptor.handle, value_bytes), timeout=GATT_TIMEOUT)
+                return {"status": "success"}
+
+        elif command == "watch_advertisements":
+            global advertisement_scanner
+
+            if advertisement_scanner is None:
+                logging.info("Starting advertisement scanner.")
+                import time
+                def advertisement_callback(device, advertisement_data):
+                    now = time.time()
+                    if now - advertisement_cache.get(device.address, 0) < ADVERTISEMENT_THROTTLE_INTERVAL:
+                        return
+                    advertisement_cache[device.address] = now
+                    if len(advertisement_cache) > MAX_ADVERTISEMENT_CACHE_SIZE and _loop and _loop.is_running():
+                        _loop.call_soon_threadsafe(_cleanup_advertisement_cache)
+                    
+                    mdata = {}
+                    for id, data in advertisement_data.manufacturer_data.items():
+                        mdata[f"0x{id:04x}"] = b64encode(data).decode('utf-8')
+                    sdata = {}
+                    for uuid, data in advertisement_data.service_data.items():
+                        sdata[uuid] = b64encode(data).decode('utf-8')
+                    
+                    if _loop and _loop.is_running():
+                        _loop.call_soon_threadsafe(_loop.create_task, send_message({
+                            "event": "advertisement_received",
+                            "address": device.address,
+                            "name": device.name or advertisement_data.local_name or "Unknown",
+                            "rssi": advertisement_data.rssi,
+                            "txPower": advertisement_data.tx_power,
+                            "uuids": [normalize_uuid(u) for u in advertisement_data.service_uuids],
+                            "manufacturerData": mdata,
+                            "serviceData": sdata
+                        }))
+                
+                advertisement_scanner = BleakScanner(advertisement_callback)
+                await advertisement_scanner.start()
+            return {"status": "success"}
+
+        elif command == "stop_watch_advertisements":
+            global advertisement_scanner
             
-            logging.debug(f"Stopping notifications for GATT characteristic {char_uuid} in service {service_uuid} on {address}")
-            
-            if address in notification_subscriptions and char_uuid in notification_subscriptions[address]:
-                try:
-                    await connected_clients[address].stop_notify(char_uuid)
-                    del notification_subscriptions[address][char_uuid]
-                    if not notification_subscriptions[address]: 
-                        del notification_subscriptions[address]
-                    logging.debug(f"Notification stopped for {char_uuid} on {address}")
-                    return {"status": "success"}
-                except Exception as e:
-                    logging.error(f"Error stopping notification for {char_uuid} on {address}: {e}")
-                    return {"status": "error", "message": f"Failed to stop notification: {e}"}
-            else:
-                logging.warning(f"Attempted to stop notifications for {char_uuid} on {address}, but was not subscribed.")
-                return {"status": "success", "message": "Not subscribed"}
+            if advertisement_scanner is not None:
+                logging.info("Stopping advertisement scanner.")
+                await advertisement_scanner.stop()
+                advertisement_scanner = None
+                advertisement_cache.clear()
+            return {"status": "success"}
 
         else:
-            logging.warning(f"Unknown command received: {command}")
             return {"status": "error", "message": f"Unknown command: {command}"}
 
     except asyncio.TimeoutError:
-        logging.error("Operation timed out.")
-        return {"status": "error", "message": "Operation timed out"}
-    except Exception as e:
-        logging.exception(f"An unexpected error occurred during command handling: {e}")
-        return {"status": "error", "message": f"An unexpected error occurred: {e}"}
+        return {"status": "error", "message": "Operation timed out."}
+    except Exception:
+        logging.exception(f"Error handling command {command}") # Log full traceback internally
+        return {"status": "error", "message": "An internal host error occurred."}
+
+class MalformedMessageError(Exception):
+    """Raised when a message from the client is not valid JSON."""
+    pass
 
 def get_message():
+    """Reads a message from stdin and decodes the 32-bit length prefix."""
     try:
         raw_length = sys.stdin.buffer.read(4)
-        if not raw_length:
-            logging.info("No message length received, exiting.")
-            sys.exit(0)
-        message_length = struct.unpack('@I', raw_length)[0]
-        message = sys.stdin.buffer.read(message_length).decode('utf-8')
-        logging.debug(f"Raw message length: {message_length}, Raw message: {message[:100]}...")
-        return json.loads(message)
+        if len(raw_length) < 4:
+            return None # stdin closed
+        # Use '=' for native byte order and standard 32-bit size
+        message_length = struct.unpack('=I', raw_length)[0]
+        if message_length > 1024 * 1024:
+            logging.error(f"Message too large: {message_length} bytes exceeds 1MB native messaging limit")
+            return None
+        message_bytes = sys.stdin.buffer.read(message_length)
+        if len(message_bytes) < message_length:
+            return None
+        message = message_bytes.decode('utf-8')
+        try:
+            return json.loads(message)
+        except json.JSONDecodeError as e:
+            raise MalformedMessageError(str(e))
     except Exception as e:
-        logging.error(f"Error reading message: {e}")
+        if not isinstance(e, MalformedMessageError):
+            logging.error(f"Error reading from stdin: {e}")
         raise
 
-async def main_loop():
-    logging.info("Starting Native Messaging Host main loop.")
-    while True:
-        try:
-            received_data = get_message()
-            request_id = received_data.get("requestId")
-            response_data = await handle_command(received_data)
+async def process_request(received_data):
+    """Handles a single request and sends a response back to the client."""
+    try:
+        if not isinstance(received_data, dict):
+            await send_message({"status": "error", "message": "Invalid message format. Expected a JSON object."})
+            return
             
-            if request_id is not None:
-                response_data["requestId"] = request_id
+        request_id = received_data.get("requestId")
+        response_data = await handle_command(received_data)
+        
+        if request_id is not None:
+            response_data["requestId"] = request_id
+        await send_message(response_data)
+    except Exception as e:
+        logging.exception(f"Error processing request: {e}")
+        try:
+            req_id = received_data.get("requestId") if isinstance(received_data, dict) else None
+            await send_message({
+                "status": "error", 
+                "message": f"Internal host error: {str(e)}", 
+                "requestId": req_id
+            })
+        except: pass
+
+async def main_loop():
+    global _loop
+    logging.info("Starting Native Messaging Host main loop.")
+    _loop = asyncio.get_running_loop()
+    loop = _loop
+    pending_tasks = set()
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 5
+    ERROR_RETRY_DELAY = 1 # seconds
+
+    try:
+        while True:
+            try:
+                received_data = await loop.run_in_executor(None, get_message)
+                if received_data is None: # stdin closed
+                    logging.info("End of stdin, exiting main loop.")
+                    break
                 
-            send_message(response_data)
-        except Exception as e:
-            logging.exception(f"Unhandled exception in main loop: {e}")
-            send_message({"status": "error", "message": f"Unhandled host error: {e}"})
+                task = asyncio.create_task(process_request(received_data))
+                pending_tasks.add(task)
+                task.add_done_callback(pending_tasks.discard)
+                consecutive_errors = 0 # Reset error counter on success
+            except MalformedMessageError as e:
+                logging.error(f"Received malformed JSON message: {e}")
+                consecutive_errors += 1
+            except Exception as e:
+                logging.exception(f"Unhandled exception in main loop: {e}")
+                consecutive_errors += 1
+
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                logging.critical(f"Exceeded {MAX_CONSECUTIVE_ERRORS} consecutive errors, shutting down.")
+                break
+            
+            if consecutive_errors > 0:
+                await asyncio.sleep(ERROR_RETRY_DELAY)
+    finally:
+        logging.info("Shutting down. Cleaning up connections...")
+        # Wait for pending tasks with a short timeout
+        if pending_tasks:
+            await asyncio.wait(pending_tasks, timeout=2.0)
+        
+        # Copy to avoid modification during iteration
+        clients = list(connected_clients.values())
+        for client in clients:
+            try:
+                if client.is_connected:
+                    await client.disconnect()
+            except Exception as e:
+                logging.error(f"Error disconnecting client {client.address}: {e}")
+        
+        if advertisement_scanner:
+            try:
+                await advertisement_scanner.stop()
+            except: pass
 
 if __name__ == "__main__":
     try:
         asyncio.run(main_loop())
     except KeyboardInterrupt:
-        logging.info("Host process interrupted by user. Exiting.")
         sys.exit(0)
     except Exception as e:
-        logging.critical(f"Fatal error during script execution: {e}")
+        logging.critical(f"Fatal error: {e}")
         sys.exit(1)
