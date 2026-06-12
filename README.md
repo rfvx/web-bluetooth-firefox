@@ -16,7 +16,6 @@ Or, if you've already cloned the repo:
 bash install.sh
 ```
 
-
 ### Step 2 — Browser extension
 
 **From the Firefox Add-on Store (recommended):**
@@ -33,6 +32,46 @@ bash install.sh
 - Firefox 109+
 - Python 3.8+ (`python3`)
 - BlueZ (standard on most Linux distros; included in `bluez` package)
+
+## Firefox Flatpak
+
+If you installed Firefox via Flatpak, three extra steps are required after running `install.sh`. The Flatpak sandbox restricts access to D-Bus (needed for BlueZ) and to host processes. These overrides persist across Firefox updates.
+
+**1. Grant the required sandbox permissions:**
+
+```bash
+# Access to your home directory (so the venv and host script are reachable)
+flatpak override --user --filesystem=home org.mozilla.firefox
+
+# Allow spawning processes on the host (needed to run the Python native host outside the sandbox)
+flatpak override --user --talk-name=org.freedesktop.Flatpak org.mozilla.firefox
+
+# BlueZ access via D-Bus
+flatpak override --user --system-talk-name=org.bluez org.mozilla.firefox
+```
+
+**2. Add yourself to the `bluetooth` group** (if not already):
+
+```bash
+sudo usermod -aG bluetooth $USER
+# Log out and back in, or run: newgrp bluetooth
+```
+
+**3. Verify the overrides are active:**
+
+```bash
+flatpak override --user --show org.mozilla.firefox
+```
+
+You should see `filesystem=home`, `talk-name=org.freedesktop.Flatpak`, and `system-talk-name=org.bluez` in the output.
+
+> **Note:** If you also need Web Serial support, you may additionally need:
+> ```bash
+> flatpak override --user --device=all org.mozilla.firefox
+> flatpak override --user --filesystem=/dev/ttyACM0 org.mozilla.firefox
+> ```
+
+---
 
 ## Features
 
@@ -61,18 +100,37 @@ See [CLAUDE.md](CLAUDE.md) for a full architecture reference.
 
 **"No devices found" / scan never returns results**
 - Make sure your Bluetooth adapter is on: `bluetoothctl show`
-- On some distros, add yourself to the `bluetooth` group:
+- Add yourself to the `bluetooth` group:
   ```bash
   sudo usermod -aG bluetooth $USER
   ```
   Then log out and back in.
 
-**"Native host is not connected"**
-- Re-run `install.sh` — it regenerates the NMH manifest with the correct path.
-- Check the manifest was written: `cat ~/.mozilla/native-messaging-hosts/webbluetooth_host.json`
+**"Native host is not connected" / constant reconnect loop in extension console**
+- Re-run `install.sh` — it regenerates the NMH manifest and launcher with correct paths.
+- For Flatpak Firefox, follow the [Firefox Flatpak](#firefox-flatpak) section above.
+- Check the manifest exists: `cat ~/.mozilla/native-messaging-hosts/webbluetooth_host.json`
+  (Flatpak: `cat ~/.var/app/org.mozilla.firefox/.mozilla/native-messaging-hosts/webbluetooth_host.json`)
+- Test the launcher directly:
+  ```bash
+  echo '{}' | ~/.local/share/webbluetooth-firefox/launcher.sh
+  ```
+  You should see log output, not a Python import error.
+
+**`SyntaxError: name 'advertisement_scanner' is used prior to global declaration`**
+- This occurs on Python 3.14+ due to duplicate `global` declarations in `webbluetooth_host.py`.
+  Fixed in this repo. If you see it, re-clone or pull the latest version.
+
+**"Bleak library not found" in native host log**
+- Re-run `install.sh` to rebuild the venv.
+- For Flatpak Firefox: make sure `--filesystem=home` and `--talk-name=org.freedesktop.Flatpak`
+  overrides are set (see [Firefox Flatpak](#firefox-flatpak) above).
 
 **Web Bluetooth not available at all**
 - The API requires a **secure context** (HTTPS, `localhost`, or `moz-extension://`).
+
+**After a Python version upgrade (e.g. 3.14 → 3.15), the host stops working**
+- Re-run `install.sh` to rebuild the venv for the new Python version.
 
 ## Building the .xpi locally
 

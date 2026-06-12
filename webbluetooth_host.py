@@ -199,7 +199,7 @@ async def handle_command(command_data):
                 client = BleakClient(address, disconnected_callback=on_disconnection, timeout=20.0)
                 try:
                     await client.connect()
-                    await asyncio.wait_for(client.get_services(), timeout=20.0)
+                    client.services
                     connected_clients[address] = client
                     return {"status": "success", "address": address}
                 except Exception as e:
@@ -481,7 +481,6 @@ async def handle_command(command_data):
                 return {"status": "success"}
 
         elif command == "watch_advertisements":
-            global advertisement_scanner
 
             if advertisement_scanner is None:
                 logging.info("Starting advertisement scanner.")
@@ -517,7 +516,6 @@ async def handle_command(command_data):
             return {"status": "success"}
 
         elif command == "stop_watch_advertisements":
-            global advertisement_scanner
             
             if advertisement_scanner is not None:
                 logging.info("Stopping advertisement scanner.")
