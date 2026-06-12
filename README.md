@@ -50,12 +50,15 @@ flatpak override --user --talk-name=org.freedesktop.Flatpak org.mozilla.firefox
 flatpak override --user --system-talk-name=org.bluez org.mozilla.firefox
 ```
 
-**2. Add yourself to the `bluetooth` group** (if not already):
+> **Security note:** `--talk-name=org.freedesktop.Flatpak` lets Firefox launch
+> processes *outside* the sandbox (this is how Firefox starts native messaging
+> hosts), which largely defeats the Flatpak sandbox for this app. Only grant it
+> if you accept that trade-off. `--filesystem=home` can likely be narrowed to
+> `--filesystem=~/.local/share/webbluetooth-firefox:ro` — try the narrow form
+> first and widen only if the host fails to start.
 
-```bash
-sudo usermod -aG bluetooth $USER
-# Log out and back in, or run: newgrp bluetooth
-```
+**2. Add yourself to the `bluetooth` group** (if not already) — see
+[Troubleshooting](#troubleshooting) below for the command.
 
 **3. Verify the overrides are active:**
 
@@ -70,6 +73,16 @@ You should see `filesystem=home`, `talk-name=org.freedesktop.Flatpak`, and `syst
 > flatpak override --user --device=all org.mozilla.firefox
 > flatpak override --user --filesystem=/dev/ttyACM0 org.mozilla.firefox
 > ```
+
+## Firefox Snap
+
+Snap-confined Firefox (Ubuntu's default) reads the standard
+`~/.mozilla/native-messaging-hosts/` manifest, but only through the
+**xdg-desktop-portal WebExtensions backend** (available on Ubuntu 22.04+ /
+`xdg-desktop-portal` ≥ 1.15). `install.sh` writes the manifest there; if the
+portal is missing on your system, the native host will never connect even
+though the manifest exists. Firefox will prompt for permission the first time
+the extension starts the host.
 
 ---
 

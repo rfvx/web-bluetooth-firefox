@@ -12,6 +12,7 @@ set -euo pipefail
 EXTENSION_ID="webbluetooth@rfvx.github.io"
 INSTALL_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/webbluetooth-firefox"
 REPO_RAW="https://raw.githubusercontent.com/rfvx/web-bluetooth-firefox/main"
+DEFAULT_NMH="${HOME}/.mozilla/native-messaging-hosts"
 
 # ── Resolve host script path ─────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
@@ -49,6 +50,13 @@ echo "Using Python: $(command -v "${PYTHON}") ($(${PYTHON} --version))"
 # A dedicated venv keeps bleak isolated from the system Python.
 VENV_DIR="${INSTALL_DIR}/venv"
 
+# A venv built against a Python that was since upgraded/removed has a dangling
+# bin/python3 symlink — detect that and rebuild instead of failing on pip below.
+if [[ -d "${VENV_DIR}" ]] && ! "${VENV_DIR}/bin/python3" -c '' &>/dev/null; then
+    echo "Existing virtual environment is broken or built for a removed Python — rebuilding."
+    rm -rf "${VENV_DIR}"
+fi
+
 if [[ ! -d "${VENV_DIR}" ]]; then
     echo "Creating virtual environment at ${VENV_DIR} ..."
     "${PYTHON}" -m venv "${VENV_DIR}"
@@ -57,7 +65,9 @@ else
 fi
 
 echo "Installing/upgrading bleak inside venv ..."
-"${VENV_DIR}/bin/pip" install --quiet --upgrade pip bleak
+# The host requires bleak >= 0.20 (service discovery during connect();
+# BleakClient.get_services() was removed in bleak 1.x).
+"${VENV_DIR}/bin/pip" install --quiet --upgrade pip 'bleak>=0.20'
 
 # ── Launcher wrapper ─────────────────────────────────────────────────────────
 # The NMH manifest points to this wrapper, which ensures the host script
@@ -81,27 +91,25 @@ if flatpak list --app 2>/dev/null | grep -q "org.mozilla.firefox"; then
 fi
 
 # System Firefox (apt, rpm, tarball) — command exists and is not a flatpak wrapper
-if command -v firefox &>/dev/null; then
-    FF_PATH="$(command -v firefox)"
-    if [[ "${FF_PATH}" != *"flatpak"* ]] && [[ "${FF_PATH}" != *"snap"* ]]; then
-        NMH_DIRS+=("${HOME}/.mozilla/native-messaging-hosts")
-        echo "  ✓ System Firefox detected (${FF_PATH})"
-    fi
+FF_PATH="$(command -v firefox 2>/dev/null || true)"
+if [[ -n "${FF_PATH}" && "${FF_PATH}" != *"flatpak"* && "${FF_PATH}" != *"snap"* ]]; then
+    NMH_DIRS+=("${DEFAULT_NMH}")
+    echo "  ✓ System Firefox detected (${FF_PATH})"
 fi
 
-# Snap Firefox — uses the same standard path as system Firefox
-if snap list firefox &>/dev/null 2>&1; then
-    SNAP_NMH="${HOME}/.mozilla/native-messaging-hosts"
-    if [[ ! " ${NMH_DIRS[*]} " =~ ${SNAP_NMH} ]]; then
-        NMH_DIRS+=("${SNAP_NMH}")
+# Snap Firefox — reads the standard NMH path, but only through the
+# xdg-desktop-portal WebExtensions backend (Ubuntu 22.04+; see README).
+if snap list firefox &>/dev/null; then
+    if [[ " ${NMH_DIRS[*]} " != *" ${DEFAULT_NMH} "* ]]; then
+        NMH_DIRS+=("${DEFAULT_NMH}")
     fi
-    echo "  ✓ Snap Firefox detected (standard NMH path)"
+    echo "  ✓ Snap Firefox detected (requires xdg-desktop-portal WebExtensions support; see README)"
 fi
 
 # Fallback — no Firefox found on PATH, write to standard location anyway
 if [[ ${#NMH_DIRS[@]} -eq 0 ]]; then
     echo "  ! No running Firefox installation detected — using default path"
-    NMH_DIRS+=("${HOME}/.mozilla/native-messaging-hosts")
+    NMH_DIRS+=("${DEFAULT_NMH}")
 fi
 
 # ── Write NMH manifest to every detected location ────────────────────────────

@@ -199,7 +199,9 @@ async def handle_command(command_data):
                 client = BleakClient(address, disconnected_callback=on_disconnection, timeout=20.0)
                 try:
                     await client.connect()
-                    client.services
+                    # Service discovery completes inside connect() on bleak >= 0.20;
+                    # client.services is populated here. (get_services() was removed
+                    # in bleak 1.x, so no explicit discovery call is possible.)
                     connected_clients[address] = client
                     return {"status": "success", "address": address}
                 except Exception as e:
