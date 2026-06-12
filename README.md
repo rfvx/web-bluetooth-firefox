@@ -33,58 +33,7 @@ bash install.sh
 - Python 3.8+ (`python3`)
 - BlueZ (standard on most Linux distros; included in `bluez` package)
 
-## Firefox Flatpak
-
-If you installed Firefox via Flatpak, three extra steps are required after running `install.sh`. The Flatpak sandbox restricts access to D-Bus (needed for BlueZ) and to host processes. These overrides persist across Firefox updates.
-
-**1. Grant the required sandbox permissions:**
-
-```bash
-# Access to your home directory (so the venv and host script are reachable)
-flatpak override --user --filesystem=home org.mozilla.firefox
-
-# Allow spawning processes on the host (needed to run the Python native host outside the sandbox)
-flatpak override --user --talk-name=org.freedesktop.Flatpak org.mozilla.firefox
-
-# BlueZ access via D-Bus
-flatpak override --user --system-talk-name=org.bluez org.mozilla.firefox
-```
-
-> **Security note:** `--talk-name=org.freedesktop.Flatpak` lets Firefox launch
-> processes *outside* the sandbox (this is how Firefox starts native messaging
-> hosts), which largely defeats the Flatpak sandbox for this app. Only grant it
-> if you accept that trade-off. `--filesystem=home` can likely be narrowed to
-> `--filesystem=~/.local/share/webbluetooth-firefox:ro` — try the narrow form
-> first and widen only if the host fails to start.
-
-**2. Add yourself to the `bluetooth` group** (if not already) — see
-[Troubleshooting](#troubleshooting) below for the command.
-
-**3. Verify the overrides are active:**
-
-```bash
-flatpak override --user --show org.mozilla.firefox
-```
-
-You should see `filesystem=home`, `talk-name=org.freedesktop.Flatpak`, and `system-talk-name=org.bluez` in the output.
-
-> **Note:** If you also need Web Serial support, you may additionally need:
-> ```bash
-> flatpak override --user --device=all org.mozilla.firefox
-> flatpak override --user --filesystem=/dev/ttyACM0 org.mozilla.firefox
-> ```
-
-## Firefox Snap
-
-Snap-confined Firefox (Ubuntu's default) reads the standard
-`~/.mozilla/native-messaging-hosts/` manifest, but only through the
-**xdg-desktop-portal WebExtensions backend** (available on Ubuntu 22.04+ /
-`xdg-desktop-portal` ≥ 1.15). `install.sh` writes the manifest there; if the
-portal is missing on your system, the native host will never connect even
-though the manifest exists. Firefox will prompt for permission the first time
-the extension starts the host.
-
----
+Installed Firefox via **Flatpak or Snap**? See [Sandboxed Firefox](#sandboxed-firefox-flatpak--snap) for the extra permissions required.
 
 ## Features
 
@@ -121,7 +70,7 @@ See [CLAUDE.md](CLAUDE.md) for a full architecture reference.
 
 **"Native host is not connected" / constant reconnect loop in extension console**
 - Re-run `install.sh` — it regenerates the NMH manifest and launcher with correct paths.
-- For Flatpak Firefox, follow the [Firefox Flatpak](#firefox-flatpak) section above.
+- For Flatpak or Snap Firefox, see [Sandboxed Firefox](#sandboxed-firefox-flatpak--snap) below.
 - Check the manifest exists: `cat ~/.mozilla/native-messaging-hosts/webbluetooth_host.json`
   (Flatpak: `cat ~/.var/app/org.mozilla.firefox/.mozilla/native-messaging-hosts/webbluetooth_host.json`)
 - Test the launcher directly:
@@ -130,20 +79,32 @@ See [CLAUDE.md](CLAUDE.md) for a full architecture reference.
   ```
   You should see log output, not a Python import error.
 
-**`SyntaxError: name 'advertisement_scanner' is used prior to global declaration`**
-- This occurs on Python 3.14+ due to duplicate `global` declarations in `webbluetooth_host.py`.
-  Fixed in this repo. If you see it, re-clone or pull the latest version.
-
 **"Bleak library not found" in native host log**
 - Re-run `install.sh` to rebuild the venv.
-- For Flatpak Firefox: make sure `--filesystem=home` and `--talk-name=org.freedesktop.Flatpak`
-  overrides are set (see [Firefox Flatpak](#firefox-flatpak) above).
+- For Flatpak Firefox: make sure the sandbox overrides are set
+  (see [Sandboxed Firefox](#sandboxed-firefox-flatpak--snap) below).
 
 **Web Bluetooth not available at all**
 - The API requires a **secure context** (HTTPS, `localhost`, or `moz-extension://`).
 
 **After a Python version upgrade (e.g. 3.14 → 3.15), the host stops working**
 - Re-run `install.sh` to rebuild the venv for the new Python version.
+
+## Sandboxed Firefox (Flatpak & Snap)
+
+**Flatpak** — the sandbox blocks BlueZ (D-Bus) and host process access. After running `install.sh`, grant:
+
+```bash
+flatpak override --user --filesystem=home org.mozilla.firefox                    # reach the venv + launcher
+flatpak override --user --talk-name=org.freedesktop.Flatpak org.mozilla.firefox  # spawn the host outside the sandbox
+flatpak override --user --system-talk-name=org.bluez org.mozilla.firefox         # BlueZ access
+```
+
+Verify with `flatpak override --user --show org.mozilla.firefox`, and make sure you're in the `bluetooth` group (see [Troubleshooting](#troubleshooting)). The overrides persist across Firefox updates.
+
+> **Security note:** `--talk-name=org.freedesktop.Flatpak` lets Firefox run processes *outside* the sandbox — that is how native messaging hosts start, but it largely defeats the Flatpak sandbox. Only grant it if you accept the trade-off. `--filesystem=home` can likely be narrowed to `--filesystem=~/.local/share/webbluetooth-firefox:ro`; try the narrow form first and widen only if the host fails to start.
+
+**Snap** (Ubuntu's default Firefox) — needs no overrides, but native messaging only works through the **xdg-desktop-portal WebExtensions backend** (Ubuntu 22.04+ / `xdg-desktop-portal` ≥ 1.15). `install.sh` writes the manifest to the standard `~/.mozilla/native-messaging-hosts/`; Firefox prompts for permission the first time the extension starts the host. If the portal is missing, the host will never connect even though the manifest exists.
 
 ## Building the .xpi locally
 
