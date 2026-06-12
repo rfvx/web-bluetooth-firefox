@@ -7,7 +7,7 @@ Enables the [Web Bluetooth API](https://developer.mozilla.org/en-US/docs/Web/API
 ### Step 1 — Native host (one command, no interaction)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Yazutsu/web-bluetooth-firefox/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/rfvx/web-bluetooth-firefox/main/install.sh)
 ```
 
 Or, if you've already cloned the repo:
