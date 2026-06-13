@@ -517,6 +517,39 @@ function rejectRequest(pickerId, errorMsg) {
 
 // Listener for content script requests
 browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // --- Admin commands from the extension's own UI (options page) ---
+    // These are gated by isFromExtensionUI: a web page / content script can never
+    // forge a moz-extension://<our-uuid>/ sender URL, so it cannot reach them.
+    const ADMIN_COMMANDS = ["list_grants", "revoke_grant", "revoke_site", "revoke_all"];
+    if (ADMIN_COMMANDS.includes(request.command)) {
+        if (!isFromExtensionUI(sender, browser.runtime)) {
+            sendResponse({ status: "error", message: "SecurityError: not authorized." });
+            return;
+        }
+        initStorage().then(async () => {
+            if (request.command === "list_grants") {
+                sendResponse({ status: "success", grants: listGrants(authorizedDevices) });
+                return;
+            }
+            let disconnects = [];
+            if (request.command === "revoke_grant") {
+                const r = forgetGrant(authorizedDevices, request.origin, request.obfuscatedId);
+                if (r.disconnectAddress) disconnects = [r.disconnectAddress];
+            } else if (request.command === "revoke_site") {
+                disconnects = revokeSite(authorizedDevices, request.origin);
+            } else if (request.command === "revoke_all") {
+                disconnects = revokeAll(authorizedDevices);
+            }
+            for (const addr of disconnects) {
+                if (port) port.postMessage({ command: "disconnect_device", address: addr });
+                for (const addrs of tabConnections.values()) addrs.delete(addr);
+            }
+            await saveAuthorizedDevices();
+            sendResponse({ status: "success" });
+        }).catch(() => sendResponse({ status: "error", message: "Storage unavailable." }));
+        return true; // asynchronous response
+    }
+
     if (!sender.tab) {
         sendResponse({ status: "error", message: "Only webpage tabs can invoke WebBluetooth commands." });
         return;
