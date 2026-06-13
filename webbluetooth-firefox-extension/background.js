@@ -157,21 +157,49 @@ async function initStorage() {
     return initPromise;
 }
 
+// Flatten the in-memory Map-of-Maps into the plain object shape kept in storage.
+function serializeAuthorizedDevices() {
+    const obj = {};
+    for (const [origin, originMap] of authorizedDevices.entries()) {
+        obj[origin] = {};
+        for (const [obfuscatedId, devInfo] of originMap.entries()) {
+            obj[origin][obfuscatedId] = {
+                address: devInfo.address,
+                name: devInfo.name,
+                services: Array.from(devInfo.services)
+            };
+        }
+    }
+    return obj;
+}
+
+// Deep-clone the in-memory state so a mutation can be rolled back if the
+// subsequent storage write fails (keeps memory consistent with persisted state).
+function cloneAuthorizedDevices(src) {
+    const copy = new Map();
+    for (const [origin, originMap] of src.entries()) {
+        const m = new Map();
+        for (const [obfuscatedId, devInfo] of originMap.entries()) {
+            m.set(obfuscatedId, {
+                address: devInfo.address,
+                name: devInfo.name,
+                services: new Set(devInfo.services)
+            });
+        }
+        copy.set(origin, m);
+    }
+    return copy;
+}
+
+// Persist current state; throws if the storage write fails so callers can react.
+async function persistAuthorizedDevices() {
+    await browser.storage.local.set({ authorizedDevices: serializeAuthorizedDevices() });
+    updateAddressMapping();
+}
+
 async function saveAuthorizedDevices() {
     try {
-        const obj = {};
-        for (const [origin, originMap] of authorizedDevices.entries()) {
-            obj[origin] = {};
-            for (const [obfuscatedId, devInfo] of originMap.entries()) {
-                obj[origin][obfuscatedId] = {
-                    address: devInfo.address,
-                    name: devInfo.name,
-                    services: Array.from(devInfo.services)
-                };
-            }
-        }
-        await browser.storage.local.set({ authorizedDevices: obj });
-        updateAddressMapping();
+        await persistAuthorizedDevices();
     } catch (e) {
         console.error("Failed to save authorized devices:", e);
     }
@@ -531,6 +559,8 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ status: "success", grants: listGrants(authorizedDevices) });
                 return;
             }
+            // Snapshot first so we can roll back if persisting the mutation fails.
+            const snapshot = cloneAuthorizedDevices(authorizedDevices);
             let disconnects = [];
             if (request.command === "revoke_grant") {
                 const r = forgetGrant(authorizedDevices, request.origin, request.obfuscatedId);
@@ -540,11 +570,19 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
             } else if (request.command === "revoke_all") {
                 disconnects = revokeAll(authorizedDevices);
             }
+            try {
+                await persistAuthorizedDevices();
+            } catch (e) {
+                // Roll back the in-memory change so it matches what's on disk.
+                authorizedDevices = snapshot;
+                sendResponse({ status: "error", message: "Storage unavailable — nothing was changed." });
+                return;
+            }
+            // Persisted successfully — only now apply the irreversible side effects.
             for (const addr of disconnects) {
                 if (port) port.postMessage({ command: "disconnect_device", address: addr });
                 for (const addrs of tabConnections.values()) addrs.delete(addr);
             }
-            await saveAuthorizedDevices();
             sendResponse({ status: "success" });
         }).catch(() => sendResponse({ status: "error", message: "Storage unavailable." }));
         return true; // asynchronous response
