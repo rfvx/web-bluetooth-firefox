@@ -596,24 +596,13 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.command === "forget_device") {
-        const originMap = authorizedDevices.get(origin);
-        if (originMap && originMap.has(request.address)) {
-            const deviceRecord = originMap.get(request.address);
-            const realAddress = deviceRecord.address;
-            originMap.delete(request.address);
-
-            // If no other origin still holds this device, disconnect active connections
-            const stillAuthorized = [...authorizedDevices.values()].some(m =>
-                [...m.values()].some(d => d.address === realAddress)
-            );
-            if (!stillAuthorized && port) {
-                port.postMessage({ command: "disconnect_device", address: realAddress });
-                for (const addrs of tabConnections.values()) addrs.delete(realAddress);
-            }
-
-            saveAuthorizedDevices().then(() => {
-                sendResponse({ status: "success" });
-            });
+        const result = forgetGrant(authorizedDevices, origin, request.address);
+        if (result.disconnectAddress && port) {
+            port.postMessage({ command: "disconnect_device", address: result.disconnectAddress });
+            for (const addrs of tabConnections.values()) addrs.delete(result.disconnectAddress);
+        }
+        if (result.removed) {
+            saveAuthorizedDevices().then(() => sendResponse({ status: "success" }));
             return true;
         }
         sendResponse({ status: "success" }); // Already forgotten or not found
