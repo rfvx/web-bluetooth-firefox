@@ -99,6 +99,7 @@ document.getElementById("revoke-all").addEventListener("click", async () => {
     if (!window.confirm("Remove every site's access to all Bluetooth devices?")) return;
     const res = await send({ command: "revoke_all" }).catch(() => null);
     if (res && res.status === "success") render();
+    else window.alert("Couldn't remove all — please try again.");
 });
 
 render();
