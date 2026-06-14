@@ -70,6 +70,7 @@ function revokeAll(authorizedDevices) {
 function listGrants(authorizedDevices) {
     const out = {};
     for (const [origin, originMap] of authorizedDevices.entries()) {
+        if (originMap.size === 0) continue; // skip empty origins so they don't render as ghost site cards
         out[origin] = [];
         for (const [obfuscatedId, devInfo] of originMap.entries()) {
             out[origin].push({

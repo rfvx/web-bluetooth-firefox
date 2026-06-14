@@ -100,6 +100,13 @@ test("revokeAll: clears everything", () => {
     assert.strictEqual(m.size, 0);
 });
 
+test("listGrants: omits origins with no devices (no ghost site cards)", () => {
+    const m = buildMap({ "https://a.com": { dev1: { address: "AA:BB", name: "Node" } } });
+    m.set("https://empty.com", new Map()); // origin left with zero grants
+    const out = listGrants(m);
+    assert.deepStrictEqual(Object.keys(out), ["https://a.com"]);
+});
+
 test("listGrants: exposes name + serviceCount, never the address", () => {
     const m = buildMap({ "https://a.com": { dev1: { address: "AA:BB", name: "Node", services: ["x", "y"] } } });
     const out = listGrants(m);
