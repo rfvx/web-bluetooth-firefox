@@ -2,9 +2,25 @@
 
 // --- Message Bridging between Page and Background Script ---
 
+// Admin/options-page commands must never originate from a web page. background.js
+// already rejects these via isFromExtensionUI; dropping them here too means a web
+// page can't even reach that gate (defense in depth). isAdminCommand comes from
+// grants.js, loaded as a content script before this one (see manifest.json). The
+// typeof guard fails open if that load order ever breaks: admin commands then fall
+// through to background, where the isFromExtensionUI gate still rejects them, while
+// ordinary Bluetooth calls keep working instead of throwing a ReferenceError.
+
 window.addEventListener('message', async (event) => {
     if (event.source === window && event.origin === window.location.origin && event.data && event.data.type === 'FROM_PAGE') {
         const { id, payload } = event.data;
+        if (payload && typeof isAdminCommand === "function" && isAdminCommand(payload.command)) {
+            window.postMessage({
+                type: 'FROM_CONTENT_SCRIPT',
+                id: id,
+                error: 'SecurityError: command not available to web pages.'
+            }, window.location.origin);
+            return;
+        }
         try {
             const response = await browser.runtime.sendMessage(payload);
             window.postMessage({

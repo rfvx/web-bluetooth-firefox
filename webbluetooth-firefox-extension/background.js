@@ -157,23 +157,68 @@ async function initStorage() {
     return initPromise;
 }
 
-async function saveAuthorizedDevices() {
-    try {
-        const obj = {};
-        for (const [origin, originMap] of authorizedDevices.entries()) {
-            obj[origin] = {};
-            for (const [obfuscatedId, devInfo] of originMap.entries()) {
-                obj[origin][obfuscatedId] = {
-                    address: devInfo.address,
-                    name: devInfo.name,
-                    services: Array.from(devInfo.services)
-                };
-            }
+// Flatten the in-memory Map-of-Maps into the plain object shape kept in storage.
+function serializeAuthorizedDevices() {
+    const obj = {};
+    for (const [origin, originMap] of authorizedDevices.entries()) {
+        obj[origin] = {};
+        for (const [obfuscatedId, devInfo] of originMap.entries()) {
+            obj[origin][obfuscatedId] = {
+                address: devInfo.address,
+                name: devInfo.name,
+                services: Array.from(devInfo.services)
+            };
         }
-        await browser.storage.local.set({ authorizedDevices: obj });
-        updateAddressMapping();
+    }
+    return obj;
+}
+
+// Deep-clone the in-memory state so a mutation can be rolled back if the
+// subsequent storage write fails (keeps memory consistent with persisted state).
+function cloneAuthorizedDevices(src) {
+    const copy = new Map();
+    for (const [origin, originMap] of src.entries()) {
+        const m = new Map();
+        for (const [obfuscatedId, devInfo] of originMap.entries()) {
+            m.set(obfuscatedId, {
+                address: devInfo.address,
+                name: devInfo.name,
+                services: new Set(devInfo.services)
+            });
+        }
+        copy.set(origin, m);
+    }
+    return copy;
+}
+
+// Persist current state; throws if the storage write fails so callers can react.
+async function persistAuthorizedDevices() {
+    await browser.storage.local.set({ authorizedDevices: serializeAuthorizedDevices() });
+    updateAddressMapping();
+}
+
+// Apply an in-memory grant mutation and persist it atomically. Snapshots first so
+// the live Map is rolled back if the storage write fails, keeping memory and disk
+// consistent. mutateFn mutates authorizedDevices and returns the MAC addresses to
+// disconnect; callers apply those irreversible side effects only when ok === true.
+async function mutateAndPersist(mutateFn) {
+    const snapshot = cloneAuthorizedDevices(authorizedDevices);
+    const disconnects = mutateFn() || [];
+    try {
+        await persistAuthorizedDevices();
+        return { ok: true, disconnects };
     } catch (e) {
-        console.error("Failed to save authorized devices:", e);
+        authorizedDevices = snapshot; // roll back so memory matches what's on disk
+        console.error("Failed to persist grant change; rolled back:", e);
+        return { ok: false, disconnects: [] };
+    }
+}
+
+// Disconnect devices at the host and drop them from per-tab connection tracking.
+function dispatchDisconnects(addresses) {
+    for (const addr of addresses) {
+        if (port) port.postMessage({ command: "disconnect_device", address: addr });
+        for (const addrs of tabConnections.values()) addrs.delete(addr);
     }
 }
 
@@ -435,7 +480,7 @@ browser.runtime.onConnect.addListener((connectionPort) => {
                 } else if (message.command === "select_device") {
                     const req = pendingWebRequests.get(pickerId);
                     if (req) {
-                        const { resolve, origin, options, pickerWindowId } = req;
+                        const { resolve, reject, origin, options, pickerWindowId } = req;
                         const { address, name } = message;
                         
                         // Generate obfuscated ID
@@ -463,19 +508,24 @@ browser.runtime.onConnect.addListener((connectionPort) => {
                             options.optionalServices.forEach(s => allowedServices.add(normalizeUUID(s)));
                         }
                         
-                        authorizedDevices.get(origin).set(obfuscatedId, {
-                            address,
-                            name,
-                            services: allowedServices
+                        const { ok } = await mutateAndPersist(() => {
+                            authorizedDevices.get(origin).set(obfuscatedId, {
+                                address,
+                                name,
+                                services: allowedServices
+                            });
+                            return [];
                         });
-                        
-                        await saveAuthorizedDevices();
 
-                        resolve({
-                            status: "success",
-                            device: { id: obfuscatedId, name }
-                        });
-                        
+                        if (ok) {
+                            resolve({
+                                status: "success",
+                                device: { id: obfuscatedId, name }
+                            });
+                        } else {
+                            reject(new Error("Failed to save device authorization. Please try again."));
+                        }
+
                         pendingWebRequests.delete(pickerId);
                         pendingPickers.delete(pickerId);
                         updateScanningState();
@@ -517,6 +567,38 @@ function rejectRequest(pickerId, errorMsg) {
 
 // Listener for content script requests
 browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
+    // --- Admin commands from the extension's own UI (options page) ---
+    // These are gated by isFromExtensionUI: a web page / content script can never
+    // forge a moz-extension://<our-uuid>/ sender URL, so it cannot reach them.
+    if (isAdminCommand(request.command)) {
+        if (!isFromExtensionUI(sender, browser.runtime)) {
+            sendResponse({ status: "error", message: "SecurityError: not authorized." });
+            return;
+        }
+        initStorage().then(async () => {
+            if (request.command === "list_grants") {
+                sendResponse({ status: "success", grants: listGrants(authorizedDevices) });
+                return;
+            }
+            const { ok, disconnects } = await mutateAndPersist(() => {
+                if (request.command === "revoke_grant") {
+                    const r = forgetGrant(authorizedDevices, request.origin, request.obfuscatedId);
+                    return r.disconnectAddress ? [r.disconnectAddress] : [];
+                }
+                if (request.command === "revoke_site") return revokeSite(authorizedDevices, request.origin);
+                return revokeAll(authorizedDevices);
+            });
+            if (!ok) {
+                sendResponse({ status: "error", message: "Storage unavailable — nothing was changed." });
+                return;
+            }
+            // Persisted successfully — only now apply the irreversible side effects.
+            dispatchDisconnects(disconnects);
+            sendResponse({ status: "success" });
+        }).catch(() => sendResponse({ status: "error", message: "Storage unavailable." }));
+        return true; // asynchronous response
+    }
+
     if (!sender.tab) {
         sendResponse({ status: "error", message: "Only webpage tabs can invoke WebBluetooth commands." });
         return;
@@ -597,27 +679,23 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
     if (request.command === "forget_device") {
         const originMap = authorizedDevices.get(origin);
-        if (originMap && originMap.has(request.address)) {
-            const deviceRecord = originMap.get(request.address);
-            const realAddress = deviceRecord.address;
-            originMap.delete(request.address);
-
-            // If no other origin still holds this device, disconnect active connections
-            const stillAuthorized = [...authorizedDevices.values()].some(m =>
-                [...m.values()].some(d => d.address === realAddress)
-            );
-            if (!stillAuthorized && port) {
-                port.postMessage({ command: "disconnect_device", address: realAddress });
-                for (const addrs of tabConnections.values()) addrs.delete(realAddress);
-            }
-
-            saveAuthorizedDevices().then(() => {
-                sendResponse({ status: "success" });
-            });
-            return true;
+        if (!originMap || !originMap.has(request.address)) {
+            sendResponse({ status: "success" }); // Already forgotten or not found
+            return;
         }
-        sendResponse({ status: "success" }); // Already forgotten or not found
-        return;
+        mutateAndPersist(() => {
+            const r = forgetGrant(authorizedDevices, origin, request.address);
+            return r.disconnectAddress ? [r.disconnectAddress] : [];
+        }).then(({ ok, disconnects }) => {
+            if (!ok) {
+                sendResponse({ status: "error", message: "Storage unavailable — nothing was changed." });
+                return;
+            }
+            // Persisted successfully — only now apply the irreversible side effects.
+            dispatchDisconnects(disconnects);
+            sendResponse({ status: "success" });
+        });
+        return true;
     }
 
     // Check if host port is connected

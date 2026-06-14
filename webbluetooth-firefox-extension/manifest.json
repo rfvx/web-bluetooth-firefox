@@ -26,8 +26,13 @@
   },
   "background": {
     "scripts": [
+      "grants.js",
       "background.js"
     ]
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
   },
   "content_scripts": [
     {
@@ -35,6 +40,7 @@
         "<all_urls>"
       ],
       "js": [
+        "grants.js",
         "content-script.js"
       ],
       "run_at": "document_start",
