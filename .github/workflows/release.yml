@@ -44,4 +44,3 @@ jobs:
           files: |
             webbluetooth-for-firefox-${{ steps.version.outputs.version }}.xpi
             signed/*.xpi
-          generate_release_notes: true
