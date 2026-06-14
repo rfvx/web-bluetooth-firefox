@@ -3,6 +3,15 @@
 // so these top-level function declarations are visible to background.js.
 // Also require()-able from Node tests via the module.exports guard at the bottom.
 
+// Commands that only the extension's own UI (options page) may issue. The single
+// source of truth shared by the background gate (isFromExtensionUI) and the
+// content-script relay drop, so the two layers can never drift apart.
+const ADMIN_COMMANDS = ["list_grants", "revoke_grant", "revoke_site", "revoke_all"];
+
+function isAdminCommand(command) {
+    return ADMIN_COMMANDS.includes(command);
+}
+
 // True only when the message came from this extension's own UI page (e.g. the
 // options page), never from a web page / content script. `runtime` is injected
 // (browser.runtime in the extension; a fake in tests).
@@ -74,5 +83,5 @@ function listGrants(authorizedDevices) {
 }
 
 if (typeof module !== "undefined" && module.exports) {
-    module.exports = { isFromExtensionUI, forgetGrant, revokeSite, revokeAll, listGrants };
+    module.exports = { ADMIN_COMMANDS, isAdminCommand, isFromExtensionUI, forgetGrant, revokeSite, revokeAll, listGrants };
 }

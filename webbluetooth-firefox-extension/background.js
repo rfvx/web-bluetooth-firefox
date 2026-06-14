@@ -197,11 +197,28 @@ async function persistAuthorizedDevices() {
     updateAddressMapping();
 }
 
-async function saveAuthorizedDevices() {
+// Apply an in-memory grant mutation and persist it atomically. Snapshots first so
+// the live Map is rolled back if the storage write fails, keeping memory and disk
+// consistent. mutateFn mutates authorizedDevices and returns the MAC addresses to
+// disconnect; callers apply those irreversible side effects only when ok === true.
+async function mutateAndPersist(mutateFn) {
+    const snapshot = cloneAuthorizedDevices(authorizedDevices);
+    const disconnects = mutateFn() || [];
     try {
         await persistAuthorizedDevices();
+        return { ok: true, disconnects };
     } catch (e) {
-        console.error("Failed to save authorized devices:", e);
+        authorizedDevices = snapshot; // roll back so memory matches what's on disk
+        console.error("Failed to persist grant change; rolled back:", e);
+        return { ok: false, disconnects: [] };
+    }
+}
+
+// Disconnect devices at the host and drop them from per-tab connection tracking.
+function dispatchDisconnects(addresses) {
+    for (const addr of addresses) {
+        if (port) port.postMessage({ command: "disconnect_device", address: addr });
+        for (const addrs of tabConnections.values()) addrs.delete(addr);
     }
 }
 
@@ -463,7 +480,7 @@ browser.runtime.onConnect.addListener((connectionPort) => {
                 } else if (message.command === "select_device") {
                     const req = pendingWebRequests.get(pickerId);
                     if (req) {
-                        const { resolve, origin, options, pickerWindowId } = req;
+                        const { resolve, reject, origin, options, pickerWindowId } = req;
                         const { address, name } = message;
                         
                         // Generate obfuscated ID
@@ -491,19 +508,24 @@ browser.runtime.onConnect.addListener((connectionPort) => {
                             options.optionalServices.forEach(s => allowedServices.add(normalizeUUID(s)));
                         }
                         
-                        authorizedDevices.get(origin).set(obfuscatedId, {
-                            address,
-                            name,
-                            services: allowedServices
+                        const { ok } = await mutateAndPersist(() => {
+                            authorizedDevices.get(origin).set(obfuscatedId, {
+                                address,
+                                name,
+                                services: allowedServices
+                            });
+                            return [];
                         });
-                        
-                        await saveAuthorizedDevices();
 
-                        resolve({
-                            status: "success",
-                            device: { id: obfuscatedId, name }
-                        });
-                        
+                        if (ok) {
+                            resolve({
+                                status: "success",
+                                device: { id: obfuscatedId, name }
+                            });
+                        } else {
+                            reject(new Error("Failed to save device authorization. Please try again."));
+                        }
+
                         pendingWebRequests.delete(pickerId);
                         pendingPickers.delete(pickerId);
                         updateScanningState();
@@ -548,8 +570,7 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // --- Admin commands from the extension's own UI (options page) ---
     // These are gated by isFromExtensionUI: a web page / content script can never
     // forge a moz-extension://<our-uuid>/ sender URL, so it cannot reach them.
-    const ADMIN_COMMANDS = ["list_grants", "revoke_grant", "revoke_site", "revoke_all"];
-    if (ADMIN_COMMANDS.includes(request.command)) {
+    if (isAdminCommand(request.command)) {
         if (!isFromExtensionUI(sender, browser.runtime)) {
             sendResponse({ status: "error", message: "SecurityError: not authorized." });
             return;
@@ -559,30 +580,20 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
                 sendResponse({ status: "success", grants: listGrants(authorizedDevices) });
                 return;
             }
-            // Snapshot first so we can roll back if persisting the mutation fails.
-            const snapshot = cloneAuthorizedDevices(authorizedDevices);
-            let disconnects = [];
-            if (request.command === "revoke_grant") {
-                const r = forgetGrant(authorizedDevices, request.origin, request.obfuscatedId);
-                if (r.disconnectAddress) disconnects = [r.disconnectAddress];
-            } else if (request.command === "revoke_site") {
-                disconnects = revokeSite(authorizedDevices, request.origin);
-            } else if (request.command === "revoke_all") {
-                disconnects = revokeAll(authorizedDevices);
-            }
-            try {
-                await persistAuthorizedDevices();
-            } catch (e) {
-                // Roll back the in-memory change so it matches what's on disk.
-                authorizedDevices = snapshot;
+            const { ok, disconnects } = await mutateAndPersist(() => {
+                if (request.command === "revoke_grant") {
+                    const r = forgetGrant(authorizedDevices, request.origin, request.obfuscatedId);
+                    return r.disconnectAddress ? [r.disconnectAddress] : [];
+                }
+                if (request.command === "revoke_site") return revokeSite(authorizedDevices, request.origin);
+                return revokeAll(authorizedDevices);
+            });
+            if (!ok) {
                 sendResponse({ status: "error", message: "Storage unavailable — nothing was changed." });
                 return;
             }
             // Persisted successfully — only now apply the irreversible side effects.
-            for (const addr of disconnects) {
-                if (port) port.postMessage({ command: "disconnect_device", address: addr });
-                for (const addrs of tabConnections.values()) addrs.delete(addr);
-            }
+            dispatchDisconnects(disconnects);
             sendResponse({ status: "success" });
         }).catch(() => sendResponse({ status: "error", message: "Storage unavailable." }));
         return true; // asynchronous response
@@ -667,17 +678,24 @@ browser.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }
 
     if (request.command === "forget_device") {
-        const result = forgetGrant(authorizedDevices, origin, request.address);
-        if (result.disconnectAddress && port) {
-            port.postMessage({ command: "disconnect_device", address: result.disconnectAddress });
-            for (const addrs of tabConnections.values()) addrs.delete(result.disconnectAddress);
+        const originMap = authorizedDevices.get(origin);
+        if (!originMap || !originMap.has(request.address)) {
+            sendResponse({ status: "success" }); // Already forgotten or not found
+            return;
         }
-        if (result.removed) {
-            saveAuthorizedDevices().then(() => sendResponse({ status: "success" }));
-            return true;
-        }
-        sendResponse({ status: "success" }); // Already forgotten or not found
-        return;
+        mutateAndPersist(() => {
+            const r = forgetGrant(authorizedDevices, origin, request.address);
+            return r.disconnectAddress ? [r.disconnectAddress] : [];
+        }).then(({ ok, disconnects }) => {
+            if (!ok) {
+                sendResponse({ status: "error", message: "Storage unavailable — nothing was changed." });
+                return;
+            }
+            // Persisted successfully — only now apply the irreversible side effects.
+            dispatchDisconnects(disconnects);
+            sendResponse({ status: "success" });
+        });
+        return true;
     }
 
     // Check if host port is connected

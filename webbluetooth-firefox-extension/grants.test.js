@@ -1,6 +1,6 @@
 const { test } = require("node:test");
 const assert = require("node:assert");
-const { isFromExtensionUI, forgetGrant, revokeSite, revokeAll, listGrants } = require("./grants.js");
+const { isAdminCommand, isFromExtensionUI, forgetGrant, revokeSite, revokeAll, listGrants } = require("./grants.js");
 
 // Build an authorizedDevices Map shaped like background.js holds in memory.
 // spec: { origin: { obfuscatedId: { address, name, services: [uuid,...] } } }
@@ -20,6 +20,18 @@ const fakeRuntime = {
     id: "webbluetooth@rfvx.github.io",
     getURL: (p) => "moz-extension://abc-uuid/" + p
 };
+
+test("isAdminCommand: options-page commands are recognized", () => {
+    for (const c of ["list_grants", "revoke_grant", "revoke_site", "revoke_all"]) {
+        assert.strictEqual(isAdminCommand(c), true);
+    }
+});
+
+test("isAdminCommand: web-page commands are never admin", () => {
+    for (const c of ["request_device", "forget_device", "read_gatt_char", "scan_devices", undefined]) {
+        assert.strictEqual(isAdminCommand(c), false);
+    }
+});
 
 test("isFromExtensionUI: our options page passes", () => {
     const sender = { id: "webbluetooth@rfvx.github.io", url: "moz-extension://abc-uuid/options.html" };

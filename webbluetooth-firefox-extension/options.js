@@ -52,7 +52,10 @@ function siteCard(origin, devices) {
         all.disabled = true;
         const res = await send({ command: "revoke_site", origin }).catch(() => null);
         if (res && res.status === "success") render();
-        else all.disabled = false;
+        else {
+            all.disabled = false;
+            window.alert("Couldn't remove this site's access — please try again.");
+        }
     });
     head.append(o, all);
     card.append(head);

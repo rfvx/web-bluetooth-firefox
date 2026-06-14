@@ -4,13 +4,13 @@
 
 // Admin/options-page commands must never originate from a web page. background.js
 // already rejects these via isFromExtensionUI; dropping them here too means a web
-// page can't even reach that gate (defense in depth).
-const PAGE_BLOCKED_COMMANDS = new Set(["list_grants", "revoke_grant", "revoke_site", "revoke_all"]);
+// page can't even reach that gate (defense in depth). isAdminCommand comes from
+// grants.js, loaded as a content script before this one (see manifest.json).
 
 window.addEventListener('message', async (event) => {
     if (event.source === window && event.origin === window.location.origin && event.data && event.data.type === 'FROM_PAGE') {
         const { id, payload } = event.data;
-        if (payload && PAGE_BLOCKED_COMMANDS.has(payload.command)) {
+        if (payload && isAdminCommand(payload.command)) {
             window.postMessage({
                 type: 'FROM_CONTENT_SCRIPT',
                 id: id,
