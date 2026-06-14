@@ -36,7 +36,7 @@ jobs:
             --artifacts-dir signed/ \
             --channel listed \
             --api-key "${{ secrets.AMO_ISSUER }}" \
-            --api-secret "${{ secrets.AMO_SECRET }}"
+            --api-secret "${{ secrets.JWT_SECRET }}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
